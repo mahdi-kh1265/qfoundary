@@ -36,7 +36,7 @@ npx skills add https://github.com/stablyai/orca --skill orchestration --global
 Install qFoundry Supervisor from this personal repo:
 
 ```bash
-npx skills add https://github.com/mahdi-kh1265/qfoundary --skill qfoundry-supervisor --global
+npx skills add https://github.com/mahdi-kh1265/qfoundary-x-orca --skill qfoundry-supervisor --global
 ```
 
 Restart Codex after installation so the skill is discovered.

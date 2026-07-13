@@ -13,13 +13,7 @@ export const QFOUNDRY_STATES = Object.freeze([
   'abandoned'
 ])
 
-const FINAL_STATES = new Set([
-  'accepted',
-  'accepted_with_follow_up',
-  'blocked_pending_user_decision',
-  'failed',
-  'abandoned'
-])
+const FINAL_STATES = new Set(['accepted', 'accepted_with_follow_up', 'failed', 'abandoned'])
 
 const ALLOWED_TRANSITIONS = Object.freeze({
   planned: ['ready', 'blocked_pending_user_decision', 'abandoned'],
@@ -130,7 +124,8 @@ export function normalizeControllerState(raw) {
     tasks: Array.isArray(raw.tasks) ? raw.tasks : [],
     processedMessages: Array.isArray(raw.processedMessages) ? raw.processedMessages : [],
     lifecycleEvents: Array.isArray(raw.lifecycleEvents) ? raw.lifecycleEvents : [],
-    checkpoints: Array.isArray(raw.checkpoints) ? raw.checkpoints : []
+    checkpoints: Array.isArray(raw.checkpoints) ? raw.checkpoints : [],
+    pendingDecisions: Array.isArray(raw.pendingDecisions) ? raw.pendingDecisions : []
   }
   for (const task of state.tasks) {
     task.status ??= 'planned'

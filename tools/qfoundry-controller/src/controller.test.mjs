@@ -18,7 +18,31 @@ function makeTempProject() {
     '# Contract\n\nStatus: approved\n\nREQ-001 and AC-001 require correct CSV escaping.\n',
     'utf8'
   )
+  runGit(projectRoot, ['init'])
+  runGit(projectRoot, ['config', 'user.email', 'qfoundry@example.test'])
+  runGit(projectRoot, ['config', 'user.name', 'qFoundry Test'])
+  runGit(projectRoot, ['add', '.qfoundry/PROJECT_CONTRACT.md'])
+  runGit(projectRoot, ['commit', '-m', 'Initial qFoundry contract'])
   return projectRoot
+}
+
+function runGit(cwd, args) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' })
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${result.stderr || result.stdout}`)
+  }
+  return result.stdout
+}
+
+function csvAssertion() {
+  return `
+    import { escapeCsv } from './csv.mjs'
+    const got = escapeCsv('a,"b')
+    if (got !== '"a,""b"') {
+      console.error('expected escaped quoted field, got ' + got)
+      process.exit(2)
+    }
+  `
 }
 
 function approvedState(projectRoot, extra = {}) {
@@ -51,6 +75,15 @@ function approvedState(projectRoot, extra = {}) {
         requirements: ['REQ-001'],
         acceptanceCriteria: ['AC-001'],
         requiredTests: ['node csv assertion'],
+        verificationCommands: [
+          {
+            command: process.execPath,
+            args: ['--input-type=module', '-e', csvAssertion()],
+            cwd: '.',
+            timeoutMs: 5_000,
+            expectedExitCode: 0
+          }
+        ],
         permittedScope: ['csv.mjs'],
         prohibitedActions: ['push', 'deploy', 'network'],
         reportPath: '.qfoundry/reports/worker.md',
@@ -109,6 +142,13 @@ class FakeOrca {
     }
   }
 
+  async terminalCreate({ worktree, title, command }) {
+    const handle = `term-custom-${this.dispatchCount + 1}`
+    this.calls.push({ name: 'terminalCreate', worktree, title, command, handle })
+    this.terminals.push({ handle, cwd: this.projectRoot, agentId: 'qfoundry-codex-worker' })
+    return { terminal: { handle } }
+  }
+
   async dispatch(taskId, terminalHandle) {
     this.dispatchCount += 1
     const dispatchId = `ctx_${this.dispatchCount}`
@@ -135,15 +175,7 @@ class FakeOrca {
 
 class CsvEvidenceReviewer {
   async review({ projectRoot }) {
-    const assertion = `
-      import { escapeCsv } from './csv.mjs'
-      const got = escapeCsv('a,"b')
-      if (got !== '"a,""b"') {
-        console.error('expected escaped quoted field, got ' + got)
-        process.exit(2)
-      }
-    `
-    const result = spawnSync(process.execPath, ['--input-type=module', '-e', assertion], {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', csvAssertion()], {
       cwd: projectRoot,
       encoding: 'utf8'
     })
@@ -199,14 +231,15 @@ async function runWithState(projectRoot, state, orca, reviewer, maxSteps = 1) {
   return controller.state
 }
 
-function workerDone(id, taskId, dispatchId) {
+function workerDone(id, taskId, dispatchId, extraPayload = {}) {
   return {
     id,
     type: 'worker_done',
     payload: {
       taskId,
       dispatchId,
-      reportPath: '.qfoundry/reports/worker.md'
+      reportPath: '.qfoundry/reports/worker.md',
+      ...extraPayload
     }
   }
 }
@@ -282,6 +315,15 @@ describe('qFoundry controller loop', () => {
     const orca = new FakeOrca(projectRoot)
     const state = approvedState(projectRoot)
     await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+    writeFileSync(
+      path.join(projectRoot, 'csv.mjs'),
+      `export function escapeCsv(value) {
+  const text = String(value)
+  return /[",\\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text
+}
+`,
+      'utf8'
+    )
 
     orca.queue.push({
       messages: [

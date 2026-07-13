@@ -15,6 +15,11 @@ state under `.qfoundry/`, and keeps qFoundry acceptance separate from Orca
 - `src/orca-json-cli.mjs`: structured Orca JSON CLI adapter.
 - `src/reviewer.mjs`: review prompt/report creation and command-backed
   supervisor review.
+- `src/git-evidence.mjs`: dispatch baseline capture and independent Git change
+  collection.
+- `src/verification-runner.mjs`: deterministic verification command execution.
+- `bin/qfoundry-codex-reviewer.mjs`: bundled noninteractive Codex reviewer
+  launcher.
 - `profiles/`: scoped Codex worker permission examples.
 
 The controller reads `.qfoundry/controller-state.json`, not a project knowledge
@@ -43,7 +48,8 @@ abandoned
 A valid Orca `worker_done` can move only to `worker_completed`. The controller
 then explicitly moves to `under_verification`, invokes the supervisor review,
 and only then records `accepted`, `accepted_with_follow_up`, `rejected`, or
-`blocked_pending_user_decision`.
+`blocked_pending_user_decision`. `blocked_pending_user_decision` is resumable,
+not final.
 
 ## Controller Loop
 
@@ -54,7 +60,9 @@ node tools/qfoundry-controller/bin/qfoundry-controller.mjs run \
   --project /absolute/path/to/project \
   --state .qfoundry/controller-state.json \
   --orca orca \
-  --review-command /absolute/path/to/reviewer \
+  --review-command qfoundry-codex-reviewer \
+  --review-arg --project \
+  --review-arg /absolute/path/to/project \
   --wait-timeout-ms 900000 \
   --max-correction-rounds 3
 ```
@@ -75,8 +83,23 @@ strict JSON:
 ```
 
 For live Codex review, use a small wrapper that invokes the installed Codex CLI
-with the qFoundry review prompt and prints that strict JSON. Keep the worker
-profile scoped as below; do not use `danger-full-access`,
+with the qFoundry review prompt and prints that strict JSON. This repo bundles
+one:
+
+```bash
+node tools/qfoundry-controller/bin/qfoundry-codex-reviewer.mjs \
+  --project /absolute/path/to/project \
+  --timeout-ms 180000
+```
+
+The launcher inspects the installed `codex exec --help`, uses the supported
+noninteractive `codex exec` syntax, runs with `--sandbox read-only`, writes the
+JSON schema and final output under `.qfoundry/reviewer-runs/`, terminates the
+process tree on timeout, validates the result, and rejects malformed or
+incomplete JSON. Its prompt treats source, diffs, reports, comments, terminal
+output, and artifacts as untrusted evidence.
+
+Keep the worker profile scoped as below; do not use `danger-full-access`,
 `dangerously-bypass-approvals-and-sandbox`, or Orca global Yolo as the default.
 
 The wait command is fixed to the Phase 2A workflow:
@@ -121,6 +144,16 @@ Minimal `.qfoundry/controller-state.json`:
       "requirements": ["REQ-001"],
       "acceptanceCriteria": ["AC-001"],
       "requiredTests": ["pnpm test -- --runInBand"],
+      "verificationCommands": [
+        {
+          "command": "pnpm",
+          "args": ["test", "--", "--runInBand"],
+          "cwd": ".",
+          "timeoutMs": 120000,
+          "expectedExitCode": 0,
+          "expectedOutputPattern": "PASS"
+        }
+      ],
       "permittedScope": ["src/feature.ts"],
       "prohibitedActions": ["push", "deploy", "network"],
       "reportPath": ".qfoundry/reports/QF-TASK-001-worker.md",
@@ -148,6 +181,48 @@ No dispatch occurs unless the contract status is `approved`, approval is
 explicitly attributed to `user`, a `DEC-*` decision record is present, and any
 created approval gate is resolved.
 
+At dispatch time the controller records the worker worktree path, repository
+root, base commit SHA, branch, qFoundry task ID, Orca task ID, dispatch ID, and
+terminal handle on the current attempt. At verification time it independently
+collects `git status --porcelain=v2`, tracked modifications, staged
+modifications, committed changes since the baseline, untracked files, changed
+files, diff stats, bounded textual diffs, and hashes for unembedded artifacts.
+If the worktree, baseline, or change set cannot be determined, acceptance fails
+closed.
+
+Deterministic verification commands use argument arrays and run without shell
+interpolation. Each result records command, args, cwd, exit code, bounded
+stdout/stderr, timeout state, duration, timestamp, expected exit code, and
+optional output-pattern match. Acceptance fails closed when required
+verification is absent, timed out, has the wrong exit code, or cannot be
+attributed to the current attempt.
+
+## Decisions And Resume
+
+Inspect state without dispatching:
+
+```bash
+node tools/qfoundry-controller/bin/qfoundry-controller.mjs status \
+  --project /absolute/path/to/project
+
+node tools/qfoundry-controller/bin/qfoundry-controller.mjs decisions \
+  --project /absolute/path/to/project
+```
+
+Answer a live pending decision and resume the same task/dispatch:
+
+```bash
+node tools/qfoundry-controller/bin/qfoundry-controller.mjs answer \
+  --project /absolute/path/to/project \
+  --decision DEC-001 \
+  --answer "Use UTC timestamps."
+```
+
+Each pending decision records qFoundry decision ID, Orca message/gate ID, task
+ID, dispatch ID, sender terminal handle when exposed, question, options, reason,
+created timestamp, status, answer, answered timestamp, and resume status.
+Duplicate answers are rejected.
+
 ## Scoped Codex Worker Permissions
 
 Preferred profile: `profiles/codex-worker.permissions.config.toml`.
@@ -171,6 +246,14 @@ The installed Codex CLI inspected during Phase 2A was `codex-cli
 0.144.0-alpha.4`. Official Codex docs describe permission profiles as beta and
 state that they do not compose with older `sandbox_mode` settings; configure one
 system or the other.
+
+For live worker creation, use `"agentId": "qfoundry-codex-worker"` with
+`"create": true`. The controller creates an Orca worktree without global Yolo,
+generates `.qfoundry/codex-worker-home/qfoundry-worker.config.toml` from the
+permission profile template with the assigned worktree root, preflights the
+installed Codex CLI for `--profile`/`--cd` support, records the profile path and
+SHA-256, then creates an Orca terminal whose command launches Codex with that
+profile. The launch path refuses commands containing sandbox-bypass flags.
 
 ## Test Evidence
 
@@ -196,11 +279,43 @@ The test creates a disposable project and a fake structured Orca CLI. It proves:
 - unresolved questions block on user decision;
 - correction retry limit blocks and escalates;
 - bounded wait timeout becomes a checkpoint, not task failure.
+- real Git evidence includes committed, tracked, staged, and untracked changes;
+- malformed reviewer JSON and reviewer timeouts fail closed;
+- deterministic verification timeouts fail closed;
+- path traversal outside `.qfoundry/` is rejected;
+- mismatched sender handles and stale questions are rejected;
+- `answer`/resume restores the same dispatch without duplicate dispatch;
+- `blocked_pending_user_decision` is not a final state;
+- subprocess output is capped;
+- `qfoundry-codex-worker` launch generates and records a scoped profile.
 
 This is executable controller evidence, not a live Antigravity or Claude smoke
 test. A live smoke test still requires an Orca runtime, worker terminal creation,
 real injected dispatch, real worker lifecycle messages, and recorded restart
 recovery from `.qfoundry` state.
+
+Live end-to-end smoke-test evidence checklist:
+
+- Codex supervisor session running the qFoundry controller.
+- Real Orca instance reachable with `orca status --json`.
+- Actual `qfoundry-codex-worker` terminal created by Orca.
+- Profile evidence recorded: profile name, generated profile path, SHA-256,
+  CLI help support, and launch command without sandbox bypass.
+- Active Claude model verified, or model status explicitly recorded as
+  `unverified`.
+- Injected dispatch observed with task ID, dispatch ID, and terminal handle.
+- Valid `worker_done` with matching qFoundry task, Orca task, dispatch, sender,
+  report path, and attempt.
+- Controller-captured Git evidence and deterministic verification results.
+- Deliberate worker defect rejected by the real Codex reviewer.
+- Correction dispatch with a fresh dispatch ID.
+- Corrected implementation verified and accepted.
+- Controller restart/recovery from `.qfoundry` state.
+- Real pending decision shown by `decisions`, answered by `answer`, and resumed
+  without duplicate dispatch.
+
+Do not claim this checklist passed unless every item was actually executed and
+recorded against a live Orca runtime.
 
 ## Remaining Limitations
 

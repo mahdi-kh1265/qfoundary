@@ -2,6 +2,7 @@
   "name": "@qfoundry/orca-controller",
   "private": true,
   "bin": {
+    "qfoundry-codex-reviewer": "./bin/qfoundry-codex-reviewer.mjs",
     "qfoundry-controller": "./bin/qfoundry-controller.mjs"
   },
   "type": "module"

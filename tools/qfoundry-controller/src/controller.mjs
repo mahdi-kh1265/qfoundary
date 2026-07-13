@@ -1,13 +1,26 @@
 import path from 'node:path'
 
+import { answerPendingDecision, createPendingDecision } from './decision-store.mjs'
 import { extractMessages, extractStartupTerminal } from './orca-json-cli.mjs'
-import { readTextIfExists, resolveProjectPath, saveControllerState } from './state-store.mjs'
+import { captureDispatchBaseline } from './git-evidence.mjs'
+import { senderTerminalHandle, validateLifecycleProvenance } from './message-provenance.mjs'
+import { saveControllerState } from './state-store.mjs'
 import {
   releaseReadyDependents,
   requireDispatchApprovalPrecondition,
   transitionTask
 } from './state-machine.mjs'
-import { readWorkerReport, writeReviewReport } from './reviewer.mjs'
+import { buildTaskReview } from './review-flow.mjs'
+import { writeReviewReport } from './reviewer.mjs'
+import { prepareCodexWorkerProfile } from './worker-profile.mjs'
+
+const CONTROLLER_ROOT = path.resolve(import.meta.dirname, '..')
+const REVIEW_VERDICTS = new Set([
+  'accepted',
+  'accepted_with_follow_up',
+  'rejected',
+  'blocked_pending_user_decision'
+])
 
 function messageId(message) {
   return (
@@ -25,16 +38,7 @@ function sameLifecycleTarget(task, message) {
 }
 
 function allTerminals(raw) {
-  if (Array.isArray(raw)) {
-    return raw
-  }
-  if (Array.isArray(raw.terminals)) {
-    return raw.terminals
-  }
-  if (Array.isArray(raw.items)) {
-    return raw.items
-  }
-  return []
+  return [raw, raw?.terminals, raw?.items].find((candidate) => Array.isArray(candidate)) ?? []
 }
 
 function taskWorktreePath(task) {
@@ -78,15 +82,7 @@ function findTaskByOrcaIds(state, message) {
 }
 
 function normalizeVerdict(verdict) {
-  if (
-    verdict === 'accepted' ||
-    verdict === 'accepted_with_follow_up' ||
-    verdict === 'rejected' ||
-    verdict === 'blocked_pending_user_decision'
-  ) {
-    return verdict
-  }
-  return 'blocked_pending_user_decision'
+  return REVIEW_VERDICTS.has(verdict) ? verdict : 'blocked_pending_user_decision'
 }
 
 export class QFoundryController {
@@ -153,6 +149,10 @@ export class QFoundryController {
   async dispatchReadyTask(task) {
     requireDispatchApprovalPrecondition(this.state)
     const terminalHandle = await this.resolveWorkerTerminal(task)
+    const baseline = await captureDispatchBaseline({
+      worktreePath: taskWorktreePath(task),
+      timeoutMs: this.state.settings.gitTimeoutMs
+    })
     if (!task.orcaTaskId) {
       const created = await this.orca.taskCreate(buildTaskSpec(this.state, task))
       if (!created.taskId) {
@@ -169,12 +169,22 @@ export class QFoundryController {
     task.worker ??= {}
     task.worker.terminalHandle = terminalHandle
     task.attempts ??= []
+    const attemptId = `${task.id}-ATTEMPT-${String(task.attempts.length + 1).padStart(3, '0')}`
     task.attempts.push({
+      id: attemptId,
+      qFoundryTaskId: task.id,
       orcaTaskId: task.orcaTaskId,
       dispatchId: task.dispatchId,
       terminalHandle,
+      workerWorktreePath: baseline.workerWorktreePath,
+      repositoryRoot: baseline.repositoryRoot,
+      baseCommitSha: baseline.baseCommitSha,
+      branch: baseline.currentBranch,
+      dispatchBaseline: baseline,
       at: this.now().toISOString()
     })
+    task.currentAttemptId = attemptId
+    task.dispatchBaseline = baseline
     await this.orca.dispatchShow(task.orcaTaskId)
     transitionTask(
       task,
@@ -202,9 +212,43 @@ export class QFoundryController {
       return replacement.handle
     }
     if (task.worker?.create === true) {
+      const agentId = task.worker.agentId ?? 'codex'
+      if (agentId === 'qfoundry-codex-worker' || task.worker.profileName) {
+        const created = await this.orca.worktreeCreate({
+          name: task.worker.worktreeName ?? task.id
+        })
+        task.worker.createdAt = this.now().toISOString()
+        task.worker.createdWorktreeId = created.id ?? created.worktree?.id ?? created.worktreeId
+        task.worktree ??= {}
+        task.worktree.path = created.path ?? created.worktree?.path ?? task.worktree.path
+        task.worktree.orcaWorktreeId = task.worker.createdWorktreeId
+        const profileEvidence = await prepareCodexWorkerProfile({
+          controllerRoot: CONTROLLER_ROOT,
+          projectRoot: this.projectRoot,
+          state: this.state,
+          task,
+          worktreePath: task.worktree.path,
+          now: this.now
+        })
+        task.worker.profileEvidence = profileEvidence
+        const createdTerminal = await this.orca.terminalCreate({
+          worktree: task.worker.createdWorktreeId ?? task.worktree.path,
+          title: task.worker.terminalTitle ?? `qFoundry ${task.id}`,
+          command: profileEvidence.launchCommand
+        })
+        const startupTerminal = extractStartupTerminal(createdTerminal) ?? createdTerminal
+        if (!startupTerminal?.handle) {
+          throw new Error(
+            `custom Codex worker launch did not return a terminal handle for ${task.id}`
+          )
+        }
+        task.worker.terminalHandle = startupTerminal.handle
+        await this.orca.terminalWait(startupTerminal.handle)
+        return startupTerminal.handle
+      }
       const created = await this.orca.worktreeCreate({
         name: task.worker.worktreeName ?? task.id,
-        agentId: task.worker.agentId ?? 'codex'
+        agentId
       })
       const startupTerminal = extractStartupTerminal(created)
       if (!startupTerminal?.handle) {
@@ -271,7 +315,17 @@ export class QFoundryController {
       return
     }
     if (message.type === 'escalation') {
-      this.blockForUser(message, id, 'worker escalation')
+      const task = findTaskByOrcaIds(this.state, message)
+      if (task) {
+        this.blockForUser(task, message, id, 'worker escalation')
+      } else {
+        this.state.lifecycleEvents.push({
+          at: this.now().toISOString(),
+          messageId: id,
+          result: 'stale_escalation_rejected'
+        })
+        this.state.processedMessages.push(id)
+      }
     }
   }
 
@@ -288,8 +342,23 @@ export class QFoundryController {
       this.state.processedMessages.push(id)
       return
     }
+    const provenance = validateLifecycleProvenance(task, message, messagePayload, {
+      requireReportPath: true
+    })
+    if (!provenance.ok) {
+      this.state.lifecycleEvents.push({
+        at: this.now().toISOString(),
+        messageId: id,
+        result: 'worker_done_provenance_rejected',
+        taskId: task.id,
+        mismatches: provenance.mismatches
+      })
+      this.state.processedMessages.push(id)
+      return
+    }
     this.state.processedMessages.push(id)
     task.workerDone = messagePayload(message)
+    task.workerDoneProvenance = provenance
     transitionTask(task, 'worker_completed', { messageId: id }, this.now())
     transitionTask(task, 'under_verification', { messageId: id }, this.now())
     await this.reviewTask(task, message)
@@ -297,8 +366,27 @@ export class QFoundryController {
 
   async processDecisionGate(message, id) {
     const payload = messagePayload(message)
-    const task = this.state.tasks.find((candidate) => candidate.orcaTaskId === payload.taskId)
+    const task = findTaskByOrcaIds(this.state, message)
     if (!task) {
+      this.state.lifecycleEvents.push({
+        at: this.now().toISOString(),
+        messageId: id,
+        result: 'stale_question_rejected',
+        taskId: payload.taskId,
+        dispatchId: payload.dispatchId
+      })
+      this.state.processedMessages.push(id)
+      return
+    }
+    const provenance = validateLifecycleProvenance(task, message, messagePayload)
+    if (!provenance.ok) {
+      this.state.lifecycleEvents.push({
+        at: this.now().toISOString(),
+        messageId: id,
+        result: 'question_provenance_rejected',
+        taskId: task.id,
+        mismatches: provenance.mismatches
+      })
       this.state.processedMessages.push(id)
       return
     }
@@ -314,37 +402,68 @@ export class QFoundryController {
       this.state.processedMessages.push(id)
       return
     }
-    this.blockForUser(message, id, 'unresolved worker question')
+    this.blockForUser(task, message, id, 'unresolved worker question')
   }
 
-  blockForUser(message, id, reason) {
-    const payload = messagePayload(message)
-    const task = this.state.tasks.find((candidate) => candidate.orcaTaskId === payload.taskId)
-    if (task && task.status === 'dispatched') {
-      transitionTask(task, 'blocked_pending_user_decision', { reason, messageId: id }, this.now())
-      task.pendingDecision = payload.question ?? payload.body ?? message.subject ?? reason
+  blockForUser(task, message, id, reason) {
+    const { decision, reused } = createPendingDecision({
+      state: this.state,
+      task,
+      message,
+      messageId: id,
+      reason,
+      messagePayload,
+      senderTerminalHandle,
+      now: this.now
+    })
+    if (reused) {
+      this.state.lifecycleEvents.push({
+        at: this.now().toISOString(),
+        messageId: id,
+        result: 'existing_decision_reused',
+        decisionId: decision.id
+      })
+      this.state.processedMessages.push(id)
+      return decision
     }
     this.state.lifecycleEvents.push({
       at: this.now().toISOString(),
       messageId: id,
       result: 'blocked_pending_user_decision',
+      decisionId: decision.id,
       reason
     })
     this.state.processedMessages.push(id)
+    return decision
+  }
+
+  async answerDecision(decisionId, answer) {
+    const decision = await answerPendingDecision({
+      state: this.state,
+      orca: this.orca,
+      decisionId,
+      answer,
+      now: this.now
+    })
+    this.state.lifecycleEvents.push({
+      at: this.now().toISOString(),
+      result: 'decision_answered',
+      decisionId,
+      taskId: decision.taskId
+    })
+    await this.persist()
+    return decision
   }
 
   async reviewTask(task, workerDoneMessage) {
-    const contractPath = this.state.contract.path ?? path.join('.qfoundry', 'PROJECT_CONTRACT.md')
-    const contractText = await readTextIfExists(resolveProjectPath(this.projectRoot, contractPath))
-    const workerReportText = await readWorkerReport(this.projectRoot, task.reportPath)
-    const diffText = await this.readDiff(task)
-    const review = await this.reviewer.review({
+    const review = await buildTaskReview({
       projectRoot: this.projectRoot,
-      contractText,
+      state: this.state,
       task,
-      workerDone: messagePayload(workerDoneMessage),
-      diffText,
-      workerReportText
+      workerDoneMessage,
+      reviewer: this.reviewer,
+      messagePayload,
+      now: this.now
     })
     review.verdict = normalizeVerdict(review.verdict)
     task.reviewReportPath = await writeReviewReport(this.projectRoot, task, review, this.now())
@@ -365,13 +484,6 @@ export class QFoundryController {
       { reviewReportPath: task.reviewReportPath },
       this.now()
     )
-  }
-
-  async readDiff(task) {
-    if (task.diffPath) {
-      return await readTextIfExists(resolveProjectPath(this.projectRoot, task.diffPath))
-    }
-    return ''
   }
 
   acceptOriginalAfterCorrection(task, review) {
@@ -456,8 +568,14 @@ export class QFoundryController {
       orcaTaskId: null,
       dispatchId: null,
       workerDone: null,
+      workerDoneProvenance: null,
       lastReview: null,
       reviewReportPath: null,
+      attempts: [],
+      currentAttemptId: null,
+      dispatchBaseline: null,
+      gitEvidence: null,
+      verificationEvidence: null,
       transitions: [],
       corrections: undefined,
       correctionInstructions: {

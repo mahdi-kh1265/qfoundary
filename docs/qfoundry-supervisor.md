@@ -209,7 +209,7 @@ node tools/qfoundry-controller/bin/qfoundry-controller.mjs run \
   --project /absolute/path/to/project \
   --state .qfoundry/controller-state.json \
   --orca orca \
-  --review-command /absolute/path/to/reviewer \
+  --review-command qfoundry-codex-reviewer \
   --wait-timeout-ms 900000 \
   --max-correction-rounds 3
 ```
@@ -220,11 +220,52 @@ The controller:
 - uses exact terminal handles, not `@codex` group routing;
 - treats bounded wait timeouts as checkpoints;
 - moves `worker_done` only to `worker_completed`;
-- runs independent supervisor review before acceptance;
+- records dispatch baseline evidence: worker worktree, repository root, base
+  SHA, branch, qFoundry task ID, Orca task ID, dispatch ID, and terminal handle;
+- independently collects real Git status, committed/staged/tracked/untracked
+  changes, changed files, diff stats, bounded textual diffs, and artifact
+  hashes before review;
+- runs structured verification commands without shell interpolation and records
+  command, args, cwd, exit code, bounded output, duration, timestamp, and
+  expected result;
+- runs independent supervisor review before acceptance, using the bundled
+  Codex reviewer launcher when configured;
+- rejects malformed review JSON, reviewer timeout, missing Git evidence, missing
+  verification, wrong-exit verification, timed-out verification, stale
+  lifecycle messages, mismatched sender handles, and report path mismatches;
 - creates fresh correction dispatches after rejection;
 - blocks after the configured correction retry limit;
+- persists pending user decisions and supports `status`, `decisions`,
+  `answer`, and `resume` commands;
 - persists progress under `.qfoundry/controller-state.json` so a restarted
   controller can continue from recorded evidence.
+
+Bundled reviewer launcher:
+
+```bash
+node tools/qfoundry-controller/bin/qfoundry-codex-reviewer.mjs \
+  --project /absolute/path/to/project \
+  --timeout-ms 180000
+```
+
+It inspects the installed `codex exec --help`, uses read-only noninteractive
+Codex execution, writes schema/output under `.qfoundry/reviewer-runs/`,
+terminates the process tree on timeout, validates the JSON schema, and treats
+source, diffs, reports, comments, terminal output, and artifacts as untrusted
+evidence.
+
+First-class decision commands:
+
+```bash
+node tools/qfoundry-controller/bin/qfoundry-controller.mjs status --project /absolute/path/to/project
+node tools/qfoundry-controller/bin/qfoundry-controller.mjs decisions --project /absolute/path/to/project
+node tools/qfoundry-controller/bin/qfoundry-controller.mjs answer --project /absolute/path/to/project --decision DEC-001 --answer "Use UTC."
+node tools/qfoundry-controller/bin/qfoundry-controller.mjs resume --project /absolute/path/to/project
+```
+
+`answer` validates that the decision is still active, sends the Orca reply,
+persists the answer, transitions the task from `blocked_pending_user_decision`
+back to its active state, and resumes without creating a duplicate dispatch.
 
 ## Worker Completion
 
@@ -329,12 +370,17 @@ End-to-end smoke-test evidence checklist:
   `escalation`, and `decision_gate`.
 - Valid `worker_done` came from the worker terminal for the expected task and
   dispatch.
-- Supervisor ran independent tests and inspected the real output.
+- Supervisor captured real Git evidence and ran deterministic verification.
 - A deliberate worker defect was introduced and supervisor rejection was
-  recorded with evidence.
-- A correction dispatch was created and independently verified.
+  recorded with evidence from the real Codex reviewer.
+- A correction dispatch was created with a fresh dispatch ID and independently
+  verified.
+- Correction report recorded the new deterministic verification evidence.
 - Restart and recovery continued from `.qfoundry` state without reusing stale
   handles or dispatch IDs.
+- A real worker question created a pending decision, `decisions` listed it,
+  `answer` resolved it, and `resume` continued the same task without duplicate
+  dispatch.
 
 Live smoke evidence is only valid when these items were actually observed. Do
 not claim a live Antigravity or Claude smoke test from static checks alone.

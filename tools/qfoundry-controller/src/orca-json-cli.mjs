@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { runProcess } from './process-runner.mjs'
 
 function getPathValue(record, keyPath) {
   return keyPath.split('.').reduce((value, key) => {
@@ -28,44 +28,50 @@ export function parseJsonOutput(stdout, commandLine) {
 }
 
 export class OrcaJsonCli {
-  constructor({ command = 'orca', cwd = process.cwd(), env = process.env } = {}) {
+  constructor({
+    command = 'orca',
+    cwd = process.cwd(),
+    env = process.env,
+    timeoutMs = 60_000,
+    maxOutputBytes = 128_000
+  } = {}) {
     this.command = command
     this.cwd = cwd
     this.env = env
+    this.timeoutMs = timeoutMs
+    this.maxOutputBytes = maxOutputBytes
   }
 
   async runJson(args, options = {}) {
     const commandLine = `${this.command} ${args.join(' ')}`
-    return await new Promise((resolve, reject) => {
-      const child = spawn(this.command, args, {
-        cwd: options.cwd ?? this.cwd,
-        env: options.env ?? this.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true
-      })
-      let stdout = ''
-      let stderr = ''
-      child.stdout.setEncoding('utf8')
-      child.stderr.setEncoding('utf8')
-      child.stdout.on('data', (chunk) => {
-        stdout += chunk
-      })
-      child.stderr.on('data', (chunk) => {
-        stderr += chunk
-      })
-      child.on('error', reject)
-      child.on('close', (code) => {
-        if (code === 0) {
-          resolve(parseJsonOutput(stdout, commandLine))
-          return
-        }
-        const error = new Error(`${commandLine} exited ${code}: ${stderr || stdout}`)
-        error.stdout = stdout
-        error.stderr = stderr
-        error.code = code
-        reject(error)
-      })
+    const result = await runProcess({
+      command: this.command,
+      args,
+      cwd: options.cwd ?? this.cwd,
+      env: options.env ?? this.env,
+      timeoutMs: options.timeoutMs ?? this.timeoutMs,
+      maxStdoutBytes: options.maxOutputBytes ?? this.maxOutputBytes,
+      maxStderrBytes: options.maxOutputBytes ?? this.maxOutputBytes
     })
+    if (result.timedOut) {
+      const error = new Error(
+        `${commandLine} timed out after ${options.timeoutMs ?? this.timeoutMs}ms`
+      )
+      error.stdout = result.stdout
+      error.stderr = result.stderr
+      error.timedOut = true
+      throw error
+    }
+    if (result.exitCode !== 0) {
+      const error = new Error(
+        `${commandLine} exited ${result.exitCode}: ${result.stderr || result.stdout}`
+      )
+      error.stdout = result.stdout
+      error.stderr = result.stderr
+      error.code = result.exitCode
+      throw error
+    }
+    return parseJsonOutput(result.stdout, commandLine)
   }
 
   async status() {
@@ -89,14 +95,24 @@ export class OrcaJsonCli {
   }
 
   async worktreeCreate({ name, agentId }) {
+    const args = ['worktree', 'create', '--name', name, '--no-parent']
+    if (agentId) {
+      args.push('--agent', agentId)
+    }
+    args.push('--json')
+    return await this.runJson(args)
+  }
+
+  async terminalCreate({ worktree, title, command }) {
     return await this.runJson([
-      'worktree',
+      'terminal',
       'create',
-      '--name',
-      name,
-      '--no-parent',
-      '--agent',
-      agentId,
+      '--worktree',
+      worktree,
+      '--title',
+      title,
+      '--command',
+      command,
       '--json'
     ])
   }
