@@ -5,6 +5,25 @@ import { readWorkerReport } from './reviewer.mjs'
 import { readTextIfExists, resolveProjectPath } from './state-store.mjs'
 import { runVerificationCommands } from './verification-runner.mjs'
 
+function currentAttempt(task) {
+  return task.currentAttemptId
+    ? task.attempts?.find((candidate) => candidate.id === task.currentAttemptId)
+    : task.attempts?.at(-1)
+}
+
+async function readTaskWorkerReport(projectRoot, task) {
+  const attempt = currentAttempt(task)
+  const reportRoot = attempt?.repositoryRoot ?? attempt?.workerWorktreePath ?? projectRoot
+  try {
+    return await readWorkerReport(reportRoot, task.reportPath)
+  } catch (error) {
+    if (reportRoot === projectRoot) {
+      throw error
+    }
+    return await readWorkerReport(projectRoot, task.reportPath)
+  }
+}
+
 export async function buildTaskReview({
   projectRoot,
   state,
@@ -17,7 +36,7 @@ export async function buildTaskReview({
   try {
     const contractPath = state.contract.path ?? path.join('.qfoundry', 'PROJECT_CONTRACT.md')
     const contractText = await readTextIfExists(resolveProjectPath(projectRoot, contractPath))
-    const workerReportText = await readWorkerReport(projectRoot, task.reportPath)
+    const workerReportText = await readTaskWorkerReport(projectRoot, task)
     const gitEvidence = await collectGitEvidence({
       task,
       timeoutMs: state.settings.gitTimeoutMs,

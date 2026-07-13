@@ -136,5 +136,8 @@ export function normalizeControllerState(raw) {
   }
   state.settings.maxCorrectionRounds ??= 3
   state.settings.waitTimeoutMs ??= 900_000
+  state.settings.maxConcurrentWorkers ??= 2
+  state.settings.rateLimitBackoffMs ??= 60_000
+  state.settings.provider ??= 'codex'
   return state
 }

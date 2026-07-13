@@ -19,17 +19,11 @@ Responsibilities:
 The supervisor owns acceptance decisions. It does not treat worker completion
 as acceptance.
 
-## Antigravity Worker
+## Codex Implementation Worker
 
-Current Orca source facts to verify before use:
-
-- Canonical Orca agent id: `antigravity`
-- Detected executable: `agy`
-- Launch command: `agy`
-- Prompt mode in source: `--prompt-interactive`
-- Resume command when a conversation ID is known: `agy --conversation <conversationId>`
-- Hook config path in current source: `~/.gemini/config/hooks.json`
-- Antigravity hook source extracts `conversationId` when available.
+Use Codex as the default MVP implementation worker. Each worker runs in a
+separate Orca terminal with a concrete handle and an assigned repository
+worktree.
 
 Responsibilities:
 
@@ -39,23 +33,32 @@ Responsibilities:
 - write the completion report
 - send exactly one `worker_done` from its own terminal
 
-Model handling:
+Identity and profile handling:
 
-- Use a Claude model only when the installed Antigravity session supports it.
-- Verify the active model from visible Antigravity state, source-confirmed
-  runtime metadata, or explicit user confirmation.
-- If verification is impossible, record `model: unverified`.
-- Never claim Claude completed the task when model identity is unverified.
+- Record the Orca terminal handle, qFoundry task ID, Orca task ID, and dispatch
+  ID in the worker report.
+- Use the preferred granular permission profile when supported by the installed
+  Codex version.
+- Use `windows-codex-compat` when the preferred permission-profile backend is
+  blocked or unavailable on Windows.
+- Record workspace-write sandbox mode, approval policy, automatic boundary
+  review, network-disabled status, effective worktree directory,
+  authenticated Codex home use, sensitive environment exclusions, absence of
+  dangerous bypass flags, and filesystem granularity.
+- Never print or copy Codex credentials.
+- Never use Yolo, full-access, or sandbox-bypass modes for qFoundry workers.
 
-## Generic Orca Worker
+## Future Adapter Worker
 
-Use this profile for any other supported TUI agent:
+Use this profile only when a later approved contract adds another supported TUI
+agent:
 
 - verify its agent id, launch command, readiness behavior, and prompt mechanism
 - use Orca tracked tasks and dispatches for supervised work
 - keep edits inside the permitted scope
 - report files, commands, tests, assumptions, and risks
 - send lifecycle messages only from the assigned terminal
+- verify provider and model attribution before naming either in evidence
 
 ## Independent Review Worker
 

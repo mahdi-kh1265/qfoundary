@@ -99,8 +99,14 @@ export class OrcaJsonCli {
     return await this.runJson(['terminal', 'list', '--json'])
   }
 
-  async worktreeCreate({ name, agentId }) {
-    const args = ['worktree', 'create', '--name', name, '--no-parent']
+  async worktreeCreate({ name, agentId, repo, noParent = true }) {
+    const args = ['worktree', 'create', '--name', name]
+    if (repo) {
+      args.push('--repo', repo)
+    }
+    if (noParent) {
+      args.push('--no-parent')
+    }
     if (agentId) {
       args.push('--agent', agentId)
     }

@@ -136,34 +136,76 @@ describe('qfoundry supervisor skill integrity', () => {
   it('documents smoke evidence without treating this integrity test as end-to-end coverage', () => {
     const text = `${read(skillPath)}\n${read(docsPath)}`
     for (const required of [
-      'Codex supervisor session',
-      'Antigravity terminal',
-      'active Claude model verified',
-      'model status explicitly recorded as',
+      'Codex supervisor/controller session',
+      'four distinct Codex worker terminals',
+      'separate Codex reviewer process or session',
+      'windows-codex-compat',
+      'four tracked Orca tasks',
       'injected dispatch',
       'valid `worker_done`',
       'supervisor ran independent tests',
       'deliberate worker defect',
       'supervisor rejection',
       'correction dispatch',
+      'worker question answered automatically',
+      'unresolved user decision',
+      'dependent task released only after prerequisite qFoundry acceptance',
       'restart',
       'recovery continued from `.qfoundry` state',
-      'Do not claim a live Antigravity or Claude smoke test'
+      'shared Codex-account throttling',
+      'Do not claim a live Codex-only four-worker smoke test'
     ]) {
       expect(text).toContain(required)
     }
   })
 
-  it('records source-backed Antigravity facts without overclaiming Claude verification', () => {
+  it('documents Codex-only defaults, Windows compatibility, and future adapters', () => {
     const text = allQFoundryText()
-    expect(text).toContain('Canonical Orca agent id: `antigravity`')
-    expect(text).toContain('Detected executable: `agy`')
-    expect(text).toContain('Launch command: `agy`')
-    expect(text).toContain('agy --conversation <conversationId>')
-    expect(text).toContain('model: unverified')
-    expect(text).toContain(
-      'Never claim Claude completed the task when model identity is unverified'
-    )
+    for (const required of [
+      'The supported MVP path is Codex-only',
+      'Primary implementation workers: separate Codex sessions',
+      'Independent reviewer: a separate read-only Codex process',
+      'Provider-neutral controller interfaces may remain',
+      'alternative providers are optional future adapters',
+      'First-class Windows compatibility mode: `windows-codex-compat`',
+      'workspace-write sandbox mode',
+      'approval policy',
+      'automatic boundary review',
+      'network disabled',
+      'effective worktree directory',
+      'authenticated Codex home',
+      'sensitive environment exclusions',
+      'absence of dangerous bypass flags',
+      'weaker filesystem granularity',
+      'Yolo, full-access, and sandbox-bypass modes remain prohibited'
+    ]) {
+      expect(text).toContain(required)
+    }
+  })
+
+  it('documents scheduler and context-packet invariants', () => {
+    const text = `${read(skillPath)}\n${read(docsPath)}\n${read(
+      join(repoRoot, 'tools', 'qfoundry-controller', 'README.md')
+    )}`
+    for (const required of [
+      '`maxConcurrentWorkers`',
+      'default is `2`',
+      'tested upper target',
+      '`4`',
+      'dependencies are satisfied by qFoundry `accepted`',
+      'concrete terminal handle',
+      'separate worktrees',
+      'ownership collisions',
+      'persisted',
+      'rate-limit',
+      'bounded backoff',
+      'objective, requirement and acceptance criterion IDs',
+      'repository/worktree assignment',
+      'dependency state',
+      'task and dispatch identities'
+    ]) {
+      expect(text).toContain(required)
+    }
   })
 
   it('does not include user-specific paths, credentials, or unsafe default guidance', () => {

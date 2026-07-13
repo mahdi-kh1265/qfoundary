@@ -6,6 +6,12 @@ controller drives Orca through the structured JSON CLI, persists restartable
 state under `.qfoundry/`, and keeps qFoundry acceptance separate from Orca
 `worker_done` completion.
 
+The supported MVP architecture is Codex-only by default: Codex supervisor,
+multiple Codex implementation workers, a separate Codex reviewer process or
+session, and deterministic qFoundry verification. Provider-neutral interfaces
+remain for future adapters, but Antigravity, Claude, or any other worker
+provider is not a prerequisite for this controller.
+
 ## Architecture
 
 - `bin/qfoundry-controller.mjs`: CLI entry point.
@@ -59,6 +65,8 @@ Launch one autonomous supervised run:
 node tools/qfoundry-controller/bin/qfoundry-controller.mjs run \
   --project /absolute/path/to/project \
   --state .qfoundry/controller-state.json \
+  --provider codex \
+  --max-workers 4 \
   --orca node \
   --orca-arg /absolute/path/to/orca/out/cli/index.js \
   --from-terminal term_supervisor \
@@ -104,6 +112,10 @@ output, and artifacts as untrusted evidence.
 Keep the worker profile scoped as below; do not use `danger-full-access`,
 `dangerously-bypass-approvals-and-sandbox`, or Orca global Yolo as the default.
 
+`--provider codex` is the only supported MVP provider. `--max-workers` writes
+`settings.maxConcurrentWorkers`; the default is `2`, and the current tested
+upper target is `4`.
+
 The wait command is fixed to the Phase 2A workflow:
 
 ```bash
@@ -134,6 +146,8 @@ Minimal `.qfoundry/controller-state.json`:
     }
   },
   "settings": {
+    "provider": "codex",
+    "maxConcurrentWorkers": 2,
     "waitTimeoutMs": 900000,
     "maxCorrectionRounds": 3
   },
@@ -182,6 +196,23 @@ concrete handle.
 No dispatch occurs unless the contract status is `approved`, approval is
 explicitly attributed to `user`, a `DEC-*` decision record is present, and any
 created approval gate is resolved.
+
+When more than one task is ready, the scheduler fills available worker slots up
+to `maxConcurrentWorkers`. It releases only dependency-ready tasks, creates
+separate worktrees for overlapping repository work, avoids obvious file or
+subsystem ownership collisions, persists task/worker/worktree mappings, and
+keeps dependents blocked until prerequisite qFoundry acceptance rather than
+Orca task completion. Rate-limit or throttle signals are recorded as bounded
+backoff and do not create duplicate dispatches or duplicate workers.
+
+Every dispatch uses exact task IDs, dispatch IDs, and terminal handles. The
+controller never relies on `@codex` group routing.
+
+Each dispatched task receives a generated context packet with the task
+objective, requirement and acceptance criterion IDs, relevant decisions,
+repository/worktree assignment, permitted and prohibited scope, required
+deterministic checks, expected completion report, dependency state, and task
+and dispatch identities.
 
 At dispatch time the controller records the worker worktree path, repository
 root, base commit SHA, branch, qFoundry task ID, Orca task ID, dispatch ID, and
@@ -239,12 +270,24 @@ Preferred profile: `profiles/codex-worker.permissions.config.toml`.
 - Marks only the assigned repository/worktree roots as trusted so autonomous
   workers do not block on first-run workspace trust prompts.
 
-Compatibility profile: `profiles/codex-worker.compat.config.toml`.
+Compatibility profile mode: `windows-codex-compat`, backed by
+`profiles/codex-worker.compat.config.toml`.
 
 - Uses `sandbox_mode = "workspace-write"`.
 - Uses `approval_policy = "on-request"`.
 - Disables sandbox network access.
 - Filters common credential environment variables.
+- Records workspace-write sandbox mode, approval policy, automatic boundary
+  review configuration, network-disabled status, effective worktree directory,
+  authenticated Codex home use, sensitive environment exclusions, absence of
+  dangerous bypass flags, and filesystem granularity.
+
+Use the preferred granular permission profile when the installed Codex version
+supports it. Use `windows-codex-compat` when that backend is blocked or
+unavailable on Windows. The compatibility profile is suitable for controlled
+personal development, but it offers weaker filesystem granularity than the
+preferred profile. Unsafe Yolo, full-access, and sandbox-bypass modes remain
+prohibited.
 
 The installed Codex CLI inspected during Phase 2A was `codex-cli
 0.144.0-alpha.4`. Official Codex docs describe permission profiles as beta and
@@ -313,20 +356,22 @@ The test creates a disposable project and a fake structured Orca CLI. It proves:
 - subprocess output is capped;
 - `qfoundry-codex-worker` launch generates and records a scoped profile.
 
-This is executable controller evidence, not a live Antigravity or Claude smoke
-test. A live smoke test still requires an Orca runtime, worker terminal creation,
-real injected dispatch, real worker lifecycle messages, and recorded restart
-recovery from `.qfoundry` state.
+This is executable controller evidence, not a live Orca/Codex end-to-end smoke
+test. A live smoke test still requires an Orca runtime, worker terminal
+creation, real injected dispatch, real worker lifecycle messages, independent
+verification, and recorded restart recovery from `.qfoundry` state.
 
 Live end-to-end smoke-test evidence checklist:
 
 - Codex supervisor session running the qFoundry controller.
 - Real Orca instance reachable with `orca status --json`.
-- Actual `qfoundry-codex-worker` terminal created by Orca.
+- Four actual `qfoundry-codex-worker` terminals created or re-resolved by Orca.
+- Four distinct tracked tasks and four distinct dispatches using exact
+  terminal handles, not group addressing.
 - Profile evidence recorded: profile name, generated profile path, SHA-256,
-  CLI help support, and launch command without sandbox bypass.
-- Active Claude model verified, or model status explicitly recorded as
-  `unverified`.
+  CLI help support, `windows-codex-compat` preflight when used, and launch
+  command without sandbox bypass.
+- Separate Codex reviewer process or session recorded its verdict.
 - Injected dispatch observed with task ID, dispatch ID, and terminal handle.
 - Valid `worker_done` with matching qFoundry task, Orca task, dispatch, sender,
   report path, and attempt.
@@ -334,9 +379,14 @@ Live end-to-end smoke-test evidence checklist:
 - Deliberate worker defect rejected by the real Codex reviewer.
 - Correction dispatch with a fresh dispatch ID.
 - Corrected implementation verified and accepted.
+- One worker question answered automatically from the approved contract.
+- One unresolved decision listed by `decisions`, answered by `answer`, and
+  resumed without duplicate dispatch.
+- One dependency released only after prerequisite qFoundry acceptance.
 - Controller restart/recovery from `.qfoundry` state.
-- Real pending decision shown by `decisions`, answered by `answer`, and resumed
-  without duplicate dispatch.
+- Shared Codex-account concurrency, throttling, queuing, or absence of
+  throttling recorded. Any throttle response must reduce concurrency or wait
+  with bounded backoff while preserving live tasks.
 
 Do not claim this checklist passed unless every item was actually executed and
 recorded against a live Orca runtime.

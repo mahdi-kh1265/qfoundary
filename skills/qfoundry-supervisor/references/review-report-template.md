@@ -55,7 +55,7 @@ Review timestamp: `[YYYY-MM-DDTHH:MM:SSZ or unknown]`
 - Linux: `[observation]`
 - Local worktree: `[observation]`
 - Remote/SSH worktree: `[observation]`
-- Non-Antigravity workers: `[observation]`
+- Alternative-provider workers: `[observation]`
 
 ## Final Verdict
 

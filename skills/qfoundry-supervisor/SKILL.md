@@ -11,7 +11,7 @@ description: >-
 # qFoundry Supervisor
 
 qFoundry Supervisor is an operating discipline for using Codex as the
-supervisor inside Orca while one or more Orca-supported worker agents implement
+supervisor inside Orca while one or more Codex worker sessions implement
 tracked tasks. It builds on the `orca-cli` and `orchestration` skills. Use those
 skills for exact command details; this skill defines the qFoundry lifecycle,
 state model, safety policy, and verification standard.
@@ -19,15 +19,14 @@ state model, safety policy, and verification standard.
 The default MVP configuration is:
 
 - Supervisor: Codex.
-- Primary implementation worker: Antigravity, preferably with a verifiable
-  Claude model when the installed Antigravity session supports that.
-- Optional reviewer: Codex or another independent Orca worker.
+- Primary implementation workers: separate Codex sessions launched through
+  Orca with concrete terminal handles.
+- Independent reviewer: a separate read-only Codex process or Codex session.
+- Deterministic verification: controlled by qFoundry, never by worker trust.
 
-Current Orca source identifies Antigravity with the TUI agent id
-`antigravity`, detects and launches the `agy` command, and resumes sessions
-with `agy --conversation <conversationId>`. Reverify against the installed Orca
-CLI and current source before relying on those facts. Do not invent
-Antigravity command names, model flags, config paths, or session protocols.
+Provider-neutral controller interfaces may remain in the code. The alternative providers are optional future adapters.
+They are not prerequisites for the MVP and must not be presented as the
+expected next step unless a later contract explicitly approves that integration.
 
 ## Non-Negotiable Rules
 
@@ -41,16 +40,15 @@ Antigravity command names, model flags, config paths, or session protocols.
 - Do not use runtime-global orchestration reset to get a clean slate.
 - Do not send lifecycle messages from the wrong terminal.
 - Do not reuse stale dispatch IDs or stale terminal handles.
-- Do not claim a model was Claude unless the active Antigravity model can be
-  verified or the user explicitly records a manual confirmation.
+- Do not claim a provider, model, or account identity that has not been
+  directly verified and recorded.
 - Do not merge, push project implementation branches, deploy, spend money,
   access secrets, send external communications, delete valuable data, or weaken
   security controls without explicit user approval.
-- Keep provider-specific behavior behind verified facts and support other
-  Orca workers when Antigravity is unavailable.
-- Keep agent permissions on Manual for qFoundry projects unless the user
-  explicitly approves a narrower exception. Do not recommend global permission
-  bypass as the default.
+- Keep provider-specific behavior behind verified adapters. The supported MVP
+  default is Codex-only.
+- Keep worker permissions scoped. Do not recommend global permission bypass,
+  Yolo, full-access, or sandbox-bypass modes as the default.
 
 ## Required State
 
@@ -115,9 +113,10 @@ Before editing or dispatching, inspect and record:
 - existing Orca task and dispatch state
 - existing `.qfoundry/` state
 - current supervisor agent identity when observable
-- available worker agents and terminal handles
-- whether Antigravity is available through the source-confirmed agent id
-- whether Antigravity's active model can be set or verified as Claude
+- Codex CLI availability for worker and reviewer processes
+- available Codex worker profiles and terminal handles
+- selected worker profile mode, including `windows-codex-compat` when used
+- whether reviewer execution is a separate Codex process or session
 - unmet prerequisites, honestly labeled
 
 Do not reset orchestration state. If unrelated Orca state exists, work around it
@@ -212,21 +211,55 @@ independent and unlikely to edit the same files.
 
 ## Phase 5: Worker Selection
 
-Prefer Antigravity for the primary worker when:
+Use Codex as the default implementation worker provider. Each implementation
+task runs in a separate Codex session or process with its own exact Orca
+terminal handle. Reviewer work must use a separate Codex process or session so
+that supervisor acceptance is not delegated to the implementation worker.
 
-- `antigravity` is a supported Orca agent id in the current source or CLI
-- the `agy` executable or configured override is available in the target host
-- the terminal can become ready according to Orca's `tui-idle` detection
-- the active model can be verified or the user explicitly confirms it
+The controller's default `maxConcurrentWorkers` is `2`; the tested upper target
+for the current MVP is `4`. The scheduler may dispatch multiple ready tasks
+only when all of these are true:
 
-If model selection is only possible through Antigravity UI/session state, create
-a manual decision gate before dispatch. If active-model verification is
-impossible, record the worker model as `unverified` and do not claim Claude did
-the work.
+- dependencies are satisfied by qFoundry `accepted` or
+  `accepted_with_follow_up`, not merely Orca `completed`
+- a concrete terminal handle is assigned or created for each worker
+- overlapping work in the same repository uses separate worktrees
+- obvious file or subsystem ownership collisions have been checked
+- task, dispatch, worker, worktree, and repository mappings are persisted
+- rate-limit or throttle signals trigger bounded backoff instead of duplicate
+  worker creation
 
-Use `references/worker-profiles.md` for worker roles. Remain provider-neutral:
-Codex, Antigravity, and other Orca-supported workers are interchangeable only
-to the degree their installed CLI behavior has been verified.
+Never use `@codex` group routing for qFoundry lifecycle work. Dispatch, wait,
+reply, and verification attribution must use exact task IDs, dispatch IDs, and
+terminal handles.
+
+Use `references/worker-profiles.md` for worker roles. Provider-neutral
+interfaces can remain as future adapter seams, but alternative providers are
+not part of the supported MVP path until their CLI behavior, lifecycle
+messages, profile isolation, and model attribution have been verified.
+
+### Codex Worker Profile Modes
+
+Preferred mode: the granular Codex permission profile, when the installed Codex
+version supports it. It should scope writes to the assigned worktree and deny
+common credential locations.
+
+First-class Windows compatibility mode: `windows-codex-compat`. Use it when the
+preferred permission-profile backend is blocked or unavailable on the host. Its
+preflight must verify and record:
+
+- workspace-write sandbox mode
+- approval policy
+- automatic boundary review configuration
+- network disabled
+- effective worktree directory
+- authenticated Codex home being used, without copying or printing credentials
+- sensitive environment exclusions
+- absence of dangerous bypass flags
+
+`windows-codex-compat` is suitable for controlled personal development, but it
+offers weaker filesystem granularity than the preferred permission profile.
+Unsafe Yolo, full-access, and sandbox-bypass modes remain prohibited.
 
 ## Phase 6: Worktree Selection
 
@@ -265,7 +298,11 @@ For each implementation task:
 
 The worker must receive the exact task specification, requirement IDs,
 acceptance criteria, permitted scope, prohibited actions, tests, and reporting
-requirements.
+requirements. Controller-generated context packets must include the task
+objective, requirement IDs, acceptance criterion IDs, relevant decisions,
+repository ID and worktree, permitted subsystem or files, prohibited actions,
+required deterministic checks, expected completion report, dependency state,
+and task and dispatch identities.
 
 ## Phase 8: Worker Reporting
 
@@ -374,9 +411,9 @@ operations, or security weakening.
 ## Failure And Recovery
 
 For supervisor restart, Orca restart, stale handles, stale dispatches, missing
-heartbeats, worker crash, failed tests, missing reports, unavailable
-Antigravity, unverified model identity, unresolved user decisions, and repeated
-task failures:
+heartbeats, worker crash, failed tests, missing reports, unavailable Codex
+worker or reviewer execution, unverified provider/model identity, unresolved
+user decisions, account throttling, and repeated task failures:
 
 - preserve `.qfoundry/` state before risky transitions
 - inspect current Orca task and dispatch state before retrying
@@ -394,11 +431,14 @@ task failures:
 A live qFoundry smoke test is valid only when each evidence item was actually
 observed in a disposable project:
 
-- Codex supervisor session running with `qfoundry-supervisor` loaded
-- Antigravity terminal created from the source-confirmed agent id
-- active Claude model verified, or model status explicitly recorded as
-  `unverified`
-- tracked Orca task created and injected dispatch observed
+- Codex supervisor/controller session running with `qfoundry-supervisor` loaded
+- four distinct Codex worker terminals created or re-resolved with exact
+  terminal handles
+- separate Codex reviewer process or session recorded
+- selected worker profile mode recorded, including `windows-codex-compat`
+  preflight evidence when used
+- four tracked Orca tasks created and four injected dispatches observed without
+  group addressing
 - coordinator wait command observed with `worker_done`, `escalation`, or
   `decision_gate` result handling
 - valid `worker_done` received from the worker terminal for the expected task
@@ -406,11 +446,19 @@ observed in a disposable project:
 - supervisor ran independent tests and inspected their real output
 - deliberate worker defect introduced and supervisor rejection recorded
 - correction dispatch created and verified independently
+- worker question answered automatically from the approved contract when the
+  answer is unambiguous
+- unresolved user decision blocked only the affected task, then resumed through
+  the qFoundry decision command
+- dependent task released only after prerequisite qFoundry acceptance
 - restart performed and recovery continued from `.qfoundry` state without
   reusing stale handles or dispatch IDs
+- shared Codex-account throttling or lack of throttling recorded, including
+  any scheduler backoff and proof that live tasks were preserved
 
-Do not claim a live Antigravity or Claude smoke test unless these observations
-were actually executed and recorded.
+Do not claim a live Codex-only four-worker smoke test unless these observations
+were actually executed and recorded. Do not claim any live Antigravity or Claude
+smoke result unless that separate adapter test was actually executed.
 
 ## First Prompt
 
@@ -429,9 +477,10 @@ My initial project goal is:
 Create a complete project contract with stable requirement and acceptance
 criterion IDs. Present it for explicit approval before implementation.
 
-After approval, create tracked Orca tasks and use no more than two
-implementation workers concurrently. Prefer Antigravity using a verified
-Claude model as the primary implementation worker.
+After approval, create tracked Orca tasks and use no more than two Codex
+implementation workers concurrently by default. Use exact terminal handles,
+separate worktrees for overlapping repository work, and qFoundry acceptance
+before releasing dependent tasks.
 
 For every worker completion, inspect the full diff, independently run the
 tests, compare the result to the approved contract, and either accept,

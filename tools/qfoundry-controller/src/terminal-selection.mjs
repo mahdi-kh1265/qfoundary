@@ -9,7 +9,7 @@ export function allTerminals(raw) {
 }
 
 export function taskWorktreePath(task) {
-  return task.worktree?.path ?? task.worker?.worktreePath ?? task.worktreePath
+  return task.worker?.worktreePath ?? task.worktree?.path ?? task.worktreePath
 }
 
 function terminalMatchesTask(terminal, task) {

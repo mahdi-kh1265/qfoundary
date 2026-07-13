@@ -386,6 +386,39 @@ describe('qFoundry controller loop', () => {
     expect(state.tasks[0].status).toBe('blocked_pending_user_decision')
   })
 
+  it('matches Orca ask decision gates by sender handle when task ids are omitted', async () => {
+    const projectRoot = makeTempProject()
+    const orca = new FakeOrca(projectRoot)
+    const state = approvedState(projectRoot)
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+
+    orca.queue.push({
+      messages: [
+        {
+          id: 'ask-with-question-only',
+          type: 'decision_gate',
+          from_handle: 'term-old',
+          subject: 'Question',
+          body: 'Which status label should be used?',
+          payload: JSON.stringify({
+            question: 'Which status label should be used?',
+            options: []
+          })
+        }
+      ]
+    })
+
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+
+    expect(state.tasks[0].status).toBe('blocked_pending_user_decision')
+    expect(state.pendingDecisions[0]).toMatchObject({
+      orcaTaskId: 'task_1',
+      dispatchId: 'ctx_1',
+      senderTerminalHandle: 'term-old',
+      question: 'Which status label should be used?'
+    })
+  })
+
   it('creates a worker terminal when a ready task explicitly requests one', async () => {
     const projectRoot = makeTempProject()
     const orca = new FakeOrca(projectRoot)

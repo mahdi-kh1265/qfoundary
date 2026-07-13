@@ -54,6 +54,8 @@ Options:
   --orca-timeout-ms <n>       Orca CLI subprocess timeout (default 60000)
   --wait-timeout-ms <n>       Bounded rolling wait interval (default from state or 900000)
   --max-correction-rounds <n> Automatic correction limit (default from state or 3)
+  --provider codex            Provider family for MVP defaults (currently codex only)
+  --max-workers <n>           Maximum simultaneous active workers (default 2, tested target 4)
   --max-steps <n>             Controller loop step cap for this invocation (default 100)
   --once                     Alias for --max-steps 1
 `
@@ -81,6 +83,16 @@ async function loadConfiguredController(args, projectRoot, statePath) {
     'max-correction-rounds',
     state.settings.maxCorrectionRounds
   )
+  state.settings.maxConcurrentWorkers = parsePositiveInteger(
+    args,
+    'max-workers',
+    state.settings.maxConcurrentWorkers
+  )
+  const provider = argValue(args, 'provider', state.settings.provider ?? 'codex')
+  if (provider !== 'codex') {
+    throw new Error('--provider currently supports only codex for the qFoundry MVP')
+  }
+  state.settings.provider = provider
   const reviewCommand = argValue(args, 'review-command')
   return new QFoundryController({
     projectRoot,

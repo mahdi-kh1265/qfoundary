@@ -1,11 +1,12 @@
 import path from 'node:path'
 
 import { answerPendingDecision, createPendingDecision } from './decision-store.mjs'
-import { extractMessages, extractStartupTerminal } from './orca-json-cli.mjs'
+import { extractMessages } from './orca-json-cli.mjs'
 import { captureDispatchBaseline } from './git-evidence.mjs'
 import { messagePayload } from './message-payload.mjs'
 import { senderTerminalHandle, validateLifecycleProvenance } from './message-provenance.mjs'
 import { saveControllerState } from './state-store.mjs'
+import { buildTaskSpec } from './task-spec.mjs'
 import {
   releaseReadyDependents,
   requireDispatchApprovalPrecondition,
@@ -13,15 +14,16 @@ import {
 } from './state-machine.mjs'
 import { buildTaskReview } from './review-flow.mjs'
 import { writeReviewReport } from './reviewer.mjs'
-import { prepareCodexWorkerProfile } from './worker-profile.mjs'
+import { resolveWorkerTerminal as resolveWorkerTerminalForTask } from './worker-terminal.mjs'
 import {
-  allTerminals,
-  bestMatchingTerminal,
-  shouldKeepCurrentTerminal,
-  taskWorktreePath
-} from './terminal-selection.mjs'
+  activeDispatchedTasks,
+  applyRateLimitBackoff,
+  isRateLimitMessage,
+  maxConcurrentWorkers,
+  readyDispatchCandidate
+} from './scheduler.mjs'
+import { taskWorktreePath } from './terminal-selection.mjs'
 
-const CONTROLLER_ROOT = path.resolve(import.meta.dirname, '..')
 const REVIEW_VERDICTS = new Set([
   'accepted',
   'accepted_with_follow_up',
@@ -40,30 +42,28 @@ function sameLifecycleTarget(task, message) {
   return payload.taskId === task.orcaTaskId && payload.dispatchId === task.dispatchId
 }
 
-function buildTaskSpec(state, task) {
-  return JSON.stringify(
-    {
-      qFoundryTaskId: task.id,
-      title: task.title,
-      objective: task.objective,
-      requirements: task.requirements ?? [],
-      acceptanceCriteria: task.acceptanceCriteria ?? [],
-      permittedScope: task.permittedScope ?? [],
-      prohibitedActions: task.prohibitedActions ?? [],
-      requiredTests: task.requiredTests ?? [],
-      reportPath: task.reportPath,
-      projectName: state.projectName,
-      correctionOf: task.correctionOf ?? null,
-      correctionInstructions: task.correctionInstructions ?? null
-    },
-    null,
-    2
-  )
-}
-
 function findTaskByOrcaIds(state, message) {
   return state.tasks.find(
     (task) => task.status === 'dispatched' && sameLifecycleTarget(task, message)
+  )
+}
+
+function findTaskBySenderHandle(state, message) {
+  const sender = senderTerminalHandle(message, messagePayload)
+  if (!sender) {
+    return null
+  }
+  return (
+    state.tasks.find(
+      (task) => task.status === 'dispatched' && task.worker?.terminalHandle === sender
+    ) ?? null
+  )
+}
+
+function isSenderOnlyDecisionGateMatch(provenance) {
+  return provenance.mismatches.every(
+    (mismatch) =>
+      mismatch.startsWith('task id mismatch:') || mismatch.startsWith('dispatch id mismatch:')
   )
 }
 
@@ -105,14 +105,11 @@ export class QFoundryController {
       await this.persist()
       return true
     }
-    const readyTask = this.state.tasks.find((task) => task.status === 'ready')
-    if (readyTask) {
-      await this.dispatchReadyTask(readyTask)
-      await this.persist()
+    const dispatches = await this.dispatchReadyTasks()
+    if (dispatches > 0) {
       return true
     }
-    const activeTask = this.state.tasks.find((task) => task.status === 'dispatched')
-    if (activeTask) {
+    if (activeDispatchedTasks(this.state).length > 0) {
       await this.waitForLifecycleEvent()
       await this.persist()
       return true
@@ -123,13 +120,40 @@ export class QFoundryController {
   releasePlannedTasks() {
     let releasedAny = false
     for (const task of this.state.tasks) {
-      if (task.status !== 'planned' || (task.dependsOn ?? []).length > 0) {
+      if (task.status !== 'planned') {
         continue
       }
-      transitionTask(task, 'ready', { reason: 'no dependencies' }, this.now())
+      const dependencies = task.dependsOn ?? []
+      const ready = dependencies.every((dependency) => {
+        const upstream = this.state.tasks.find((candidate) => candidate.id === dependency)
+        return upstream && ['accepted', 'accepted_with_follow_up'].includes(upstream.status)
+      })
+      if (!ready) {
+        continue
+      }
+      transitionTask(
+        task,
+        'ready',
+        { reason: dependencies.length === 0 ? 'no dependencies' : 'all dependencies accepted' },
+        this.now()
+      )
       releasedAny = true
     }
     return releasedAny
+  }
+
+  async dispatchReadyTasks() {
+    let dispatched = 0
+    while (activeDispatchedTasks(this.state).length < maxConcurrentWorkers(this.state)) {
+      const task = readyDispatchCandidate(this.state, this.now())
+      if (!task) {
+        break
+      }
+      await this.dispatchReadyTask(task)
+      dispatched += 1
+      await this.persist()
+    }
+    return dispatched
   }
 
   async dispatchReadyTask(task) {
@@ -181,76 +205,13 @@ export class QFoundryController {
   }
 
   async resolveWorkerTerminal(task) {
-    const terminals = allTerminals(await this.orca.terminalList())
-    const currentHandle = task.worker?.terminalHandle
-    const current = terminals.find((terminal) => terminal.handle === currentHandle)
-    const bestMatch = bestMatchingTerminal(terminals, task)
-    if (current && shouldKeepCurrentTerminal(current, bestMatch, task)) {
-      await this.orca.terminalWait(current.handle)
-      return current.handle
-    }
-    const replacement = bestMatch
-    if (replacement?.handle) {
-      task.worker ??= {}
-      task.worker.previousTerminalHandle = currentHandle
-      task.worker.terminalHandle = replacement.handle
-      task.worker.reResolvedAt = this.now().toISOString()
-      await this.orca.terminalWait(replacement.handle)
-      return replacement.handle
-    }
-    if (task.worker?.create === true) {
-      const agentId = task.worker.agentId ?? 'codex'
-      if (agentId === 'qfoundry-codex-worker' || task.worker.profileName) {
-        const created = await this.orca.worktreeCreate({
-          name: task.worker.worktreeName ?? task.id
-        })
-        task.worker.createdAt = this.now().toISOString()
-        task.worker.createdWorktreeId = created.id ?? created.worktree?.id ?? created.worktreeId
-        task.worktree ??= {}
-        task.worktree.path = created.path ?? created.worktree?.path ?? task.worktree.path
-        task.worktree.orcaWorktreeId = task.worker.createdWorktreeId
-        const profileEvidence = await prepareCodexWorkerProfile({
-          controllerRoot: CONTROLLER_ROOT,
-          projectRoot: this.projectRoot,
-          state: this.state,
-          task,
-          worktreePath: task.worktree.path,
-          now: this.now
-        })
-        task.worker.profileEvidence = profileEvidence
-        const createdTerminal = await this.orca.terminalCreate({
-          worktree: task.worker.createdWorktreeId ?? task.worktree.path,
-          title: task.worker.terminalTitle ?? `qFoundry ${task.id}`,
-          command: profileEvidence.launchCommand
-        })
-        const startupTerminal = extractStartupTerminal(createdTerminal) ?? createdTerminal
-        if (!startupTerminal?.handle) {
-          throw new Error(
-            `custom Codex worker launch did not return a terminal handle for ${task.id}`
-          )
-        }
-        task.worker.terminalHandle = startupTerminal.handle
-        await this.orca.terminalWait(startupTerminal.handle)
-        return startupTerminal.handle
-      }
-      const created = await this.orca.worktreeCreate({
-        name: task.worker.worktreeName ?? task.id,
-        agentId
-      })
-      const startupTerminal = extractStartupTerminal(created)
-      if (!startupTerminal?.handle) {
-        throw new Error(`worker creation did not return a startup terminal handle for ${task.id}`)
-      }
-      task.worker.terminalHandle = startupTerminal.handle
-      task.worker.createdAt = this.now().toISOString()
-      task.worker.createdWorktreeId = created.id ?? created.worktree?.id ?? created.worktreeId
-      task.worktree ??= {}
-      task.worktree.path = created.path ?? created.worktree?.path ?? task.worktree.path
-      task.worktree.orcaWorktreeId = task.worker.createdWorktreeId
-      await this.orca.terminalWait(startupTerminal.handle)
-      return startupTerminal.handle
-    }
-    throw new Error(`no concrete worker terminal handle resolved for ${task.id}`)
+    return await resolveWorkerTerminalForTask({
+      task,
+      state: this.state,
+      orca: this.orca,
+      projectRoot: this.projectRoot,
+      now: this.now
+    })
   }
 
   async waitForLifecycleEvent() {
@@ -271,35 +232,33 @@ export class QFoundryController {
     if (this.state.settings.submitInjectedDispatchEnter !== true) {
       return
     }
-    const activeTask = this.state.tasks.find((task) => task.status === 'dispatched')
-    if (
-      !activeTask ||
-      activeTask.injectedDispatchSubmittedForDispatchId === activeTask.dispatchId
-    ) {
-      return
+    for (const activeTask of activeDispatchedTasks(this.state)) {
+      if (activeTask.injectedDispatchSubmittedForDispatchId === activeTask.dispatchId) {
+        continue
+      }
+      const terminalHandle = activeTask.worker?.terminalHandle
+      if (!terminalHandle) {
+        throw new Error(
+          `cannot submit injected dispatch draft without terminal handle for ${activeTask.id}`
+        )
+      }
+      const waitResult = await this.orca.terminalWait(terminalHandle, 1000)
+      const wait = waitResult?.result?.wait ?? waitResult?.wait ?? waitResult
+      let result = 'injected_dispatch_already_running'
+      if (wait?.satisfied !== false) {
+        await this.orca.terminalSendEnter(terminalHandle)
+        result = 'injected_dispatch_submitted'
+      }
+      activeTask.injectedDispatchSubmittedAt = this.now().toISOString()
+      activeTask.injectedDispatchSubmittedForDispatchId = activeTask.dispatchId
+      this.state.lifecycleEvents.push({
+        at: activeTask.injectedDispatchSubmittedAt,
+        result,
+        taskId: activeTask.id,
+        dispatchId: activeTask.dispatchId,
+        terminalHandle
+      })
     }
-    const terminalHandle = activeTask.worker?.terminalHandle
-    if (!terminalHandle) {
-      throw new Error(
-        `cannot submit injected dispatch draft without terminal handle for ${activeTask.id}`
-      )
-    }
-    const waitResult = await this.orca.terminalWait(terminalHandle, 1000)
-    const wait = waitResult?.result?.wait ?? waitResult?.wait ?? waitResult
-    let result = 'injected_dispatch_already_running'
-    if (wait?.satisfied !== false) {
-      await this.orca.terminalSendEnter(terminalHandle)
-      result = 'injected_dispatch_submitted'
-    }
-    activeTask.injectedDispatchSubmittedAt = this.now().toISOString()
-    activeTask.injectedDispatchSubmittedForDispatchId = activeTask.dispatchId
-    this.state.lifecycleEvents.push({
-      at: activeTask.injectedDispatchSubmittedAt,
-      result,
-      taskId: activeTask.id,
-      dispatchId: activeTask.dispatchId,
-      terminalHandle
-    })
   }
 
   async inspectActiveDispatches() {
@@ -340,6 +299,18 @@ export class QFoundryController {
     if (message.type === 'escalation') {
       const task = findTaskByOrcaIds(this.state, message)
       if (task) {
+        if (isRateLimitMessage(message, messagePayload)) {
+          const backoff = applyRateLimitBackoff(this.state, task, this.now())
+          this.state.lifecycleEvents.push({
+            at: this.now().toISOString(),
+            messageId: id,
+            result: 'rate_limit_backoff_recorded',
+            taskId: task.id,
+            ...backoff
+          })
+          this.state.processedMessages.push(id)
+          return
+        }
         this.blockForUser(task, message, id, 'worker escalation')
       } else {
         this.state.lifecycleEvents.push({
@@ -389,7 +360,8 @@ export class QFoundryController {
 
   async processDecisionGate(message, id) {
     const payload = messagePayload(message)
-    const task = findTaskByOrcaIds(this.state, message)
+    const task =
+      findTaskByOrcaIds(this.state, message) ?? findTaskBySenderHandle(this.state, message)
     if (!task) {
       this.state.lifecycleEvents.push({
         at: this.now().toISOString(),
@@ -402,7 +374,7 @@ export class QFoundryController {
       return
     }
     const provenance = validateLifecycleProvenance(task, message, messagePayload)
-    if (!provenance.ok) {
+    if (!provenance.ok && !isSenderOnlyDecisionGateMatch(provenance)) {
       this.state.lifecycleEvents.push({
         at: this.now().toISOString(),
         messageId: id,

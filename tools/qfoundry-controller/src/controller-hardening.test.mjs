@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -235,12 +235,6 @@ function reviewInput(projectRoot) {
     verificationEvidence: { ok: true, results: [] },
     workerReportText: ''
   }
-}
-
-function makeCodexHelpMock(projectRoot) {
-  const filePath = path.join(projectRoot, 'codex-mock.mjs')
-  writeFileSync(filePath, 'console.log("--profile --cd --sandbox --ask-for-approval")\n', 'utf8')
-  return { command: process.execPath, args: [filePath] }
 }
 
 afterEach(() => {
@@ -491,38 +485,6 @@ describe('qFoundry controller hardening', () => {
     expect(isFinalQFoundryState('blocked_pending_user_decision')).toBe(false)
   })
 
-  it('launches a requested qfoundry-codex-worker with a generated scoped profile', async () => {
-    const projectRoot = makeTempProject()
-    const codexMock = makeCodexHelpMock(projectRoot)
-    const orca = new FakeOrca(projectRoot)
-    orca.terminals = []
-    const state = approvedState(projectRoot, {
-      task: {
-        worktree: {},
-        worker: {
-          agentId: 'qfoundry-codex-worker',
-          create: true,
-          worktreeName: 'qf-profiled-worker',
-          codexCommand: codexMock.command,
-          codexCommandArgs: codexMock.args
-        }
-      }
-    })
-    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
-    const terminalCreate = orca.calls.find((call) => call.name === 'terminalCreate')
-    expect(terminalCreate.command).toContain('--profile')
-    expect(terminalCreate.command).toContain('qfoundry-worker')
-    expect(readFileSync(state.tasks[0].worker.profileEvidence.profilePath, 'utf8')).toContain(
-      projectRoot.replaceAll('\\', '/')
-    )
-    expect(readFileSync(state.tasks[0].worker.profileEvidence.profilePath, 'utf8')).toContain(
-      `[projects.${JSON.stringify(path.resolve(projectRoot))}]`
-    )
-    expect(state.tasks[0].worker.profileEvidence.trustedProjectRoots).toContain(
-      path.resolve(projectRoot)
-    )
-  })
-
   it('unwraps live Orca result envelopes for terminal lists, messages, and startup terminals', async () => {
     const projectRoot = makeTempProject()
     const orca = new FakeOrca(projectRoot)
@@ -537,6 +499,11 @@ describe('qFoundry controller hardening', () => {
 
     expect(state.tasks[0].status).toBe('dispatched')
     expect(orca.dispatches[0].terminalHandle).toBe('term-live')
+    const spec = JSON.parse(orca.tasks[0].spec)
+    expect(spec.contextPacketVersion).toBe(1)
+    expect(spec.orchestrationIdentity.qFoundryTaskId).toBe('QF-TASK-001')
+    expect(spec.expectedCompletionReport.mustSendWorkerDone).toBe(true)
+    expect(spec.repository.worktree).toBe(projectRoot)
     expect(extractMessages({ result: { messages: [{ id: 'message-live' }] } })).toEqual([
       { id: 'message-live' }
     ])
@@ -613,43 +580,5 @@ describe('qFoundry controller hardening', () => {
     expect(dispatch.raw.argv).toContain('term-supervisor')
     expect(wait.argv).toContain('--terminal')
     expect(wait.argv).toContain('term-supervisor')
-  })
-
-  it('can place the generated worker profile in an authenticated Codex home by explicit opt-in', async () => {
-    const projectRoot = makeTempProject()
-    const codexMock = makeCodexHelpMock(projectRoot)
-    const authHome = path.join(projectRoot, '.codex-auth-home')
-    const orca = new FakeOrca(projectRoot)
-    orca.terminals = []
-    const state = approvedState(projectRoot, {
-      task: {
-        worktree: {},
-        worker: {
-          agentId: 'qfoundry-codex-worker',
-          create: true,
-          worktreeName: 'qf-auth-worker',
-          codexCommand: codexMock.command,
-          codexCommandArgs: codexMock.args,
-          useAuthenticatedCodexHome: true
-        }
-      }
-    })
-    const oldCodexHome = process.env.CODEX_HOME
-    process.env.CODEX_HOME = authHome
-    try {
-      await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
-    } finally {
-      if (oldCodexHome) {
-        process.env.CODEX_HOME = oldCodexHome
-      } else {
-        delete process.env.CODEX_HOME
-      }
-    }
-    expect(state.tasks[0].worker.profileEvidence.profilePath).toBe(
-      path.join(authHome, 'qfoundry-worker.config.toml')
-    )
-    expect(state.tasks[0].worker.profileEvidence.authBoundary).toContain(
-      'existing authenticated Codex home'
-    )
   })
 })

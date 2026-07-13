@@ -1,7 +1,12 @@
-# Compatibility profile for Codex clients that do not support permission profiles.
+# qFoundry mode: windows-codex-compat
+#
+# Compatibility profile for Codex clients or Windows hosts where granular
+# permission profiles are unavailable or blocked by the local sandbox backend.
 #
 # Launch the worker with --cd pointing at the assigned worktree and do not pass
 # --add-dir for unrelated repositories or credential locations.
+# This mode is suitable for controlled personal development, but it has weaker
+# filesystem granularity than codex-worker.permissions.config.toml.
 
 sandbox_mode = "workspace-write"
 approval_policy = "on-request"
