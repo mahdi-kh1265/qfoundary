@@ -91,6 +91,7 @@ docs/**
 docs/reference/react-performance-audit.md
 !docs/STYLEGUIDE.md
 !docs/mobile-terminal-shortcut-bar.md
+!docs/qfoundry-supervisor.md
 
 # Stably CLI (only docs/ are tracked)
 .stably/*
