@@ -139,6 +139,17 @@ my explicit approval.
 Use an Orca decision gate or ask/reply flow when available. Do not infer
 approval from silence or from a request for a draft.
 
+Contract approval is a mandatory dispatch precondition. No task may be
+dispatched unless:
+
+- contract status is exactly `approved`;
+- approval is explicitly attributable to the user;
+- a `DEC-*` decision record exists in `.qfoundry/DECISION_LOG.md`;
+- any Orca approval gate created for the contract is resolved.
+
+If any of those conditions is missing, do not dispatch. Record the missing
+evidence and ask, escalate, or create a decision gate instead.
+
 ## Task And Dispatch Workflow
 
 The supervisor creates tracked tasks:
@@ -168,6 +179,18 @@ orca orchestration dispatch --task <task_id> --to <handle> --inject --json
 orca orchestration dispatch-show --task <task_id> --json
 ```
 
+Wait for coordinator events with a bounded rolling interval:
+
+```bash
+orca orchestration check --wait
+  --types worker_done,escalation,decision_gate
+  --timeout-ms <bounded rolling interval>
+  --json
+```
+
+Each timeout is a checkpoint, not failure. Before retrying or intervening,
+inspect task status, dispatch status, heartbeat history, and terminal state.
+
 If the installed CLI rejects agent-first worktree creation or `--inject`, follow
 the current `orca-cli` and `orchestration` skill guidance and record the
 limitation in `.qfoundry/PROJECT_STATE.md`.
@@ -181,6 +204,18 @@ deviations, unresolved issues, risks, and follow-up.
 
 For long-running work, workers send heartbeat messages as requested by the
 Orca dispatch preamble. Blocking questions go through `orca orchestration ask`.
+
+Status mapping:
+
+- Orca task status `completed` means Orca received a valid lifecycle completion
+  signal; it maps only to qFoundry `worker_completed`.
+- qFoundry `worker_completed` means the worker report and `worker_done` exist,
+  but supervisor acceptance has not happened.
+- qFoundry `under_verification` means the supervisor is independently checking
+  files, diff, tests, requirements, and acceptance criteria.
+- qFoundry `accepted`, `rejected`, or `blocked` is the supervisor verdict after
+  verification or an explicit blocker. `accepted_with_follow_up` is allowed only
+  when acceptance criteria passed and follow-up work is tracked separately.
 
 ## Verification And Rejection
 
@@ -251,6 +286,27 @@ Use a disposable repository, not an important project:
 14. Write `.qfoundry` state and a report.
 15. Stop without merging or publishing.
 
+End-to-end smoke-test evidence checklist:
+
+- Codex supervisor session is running with `qfoundry-supervisor` loaded.
+- Antigravity terminal was created from the source-confirmed agent id.
+- Active Claude model was verified, or model status was explicitly recorded as
+  `unverified`.
+- A tracked Orca task was created and an injected dispatch was observed.
+- Coordinator waiting used `orca orchestration check --wait` for `worker_done`,
+  `escalation`, and `decision_gate`.
+- Valid `worker_done` came from the worker terminal for the expected task and
+  dispatch.
+- Supervisor ran independent tests and inspected the real output.
+- A deliberate worker defect was introduced and supervisor rejection was
+  recorded with evidence.
+- A correction dispatch was created and independently verified.
+- Restart and recovery continued from `.qfoundry` state without reusing stale
+  handles or dispatch IDs.
+
+Live smoke evidence is only valid when these items were actually observed. Do
+not claim a live Antigravity or Claude smoke test from static checks alone.
+
 If Antigravity auth, model confirmation, or Orca runtime state blocks the smoke
 test, do not bypass account security and do not claim success. Record the exact
 manual action needed and the command to resume.
@@ -268,14 +324,20 @@ manual action needed and the command to resume.
 
 ## Updating Your Personal Repo
 
-If your personal repository tracks Orca upstream, update its default branch with:
+If your personal repository tracks Orca upstream, inspect remotes before
+pushing:
 
 ```bash
+git remote -v
 git fetch upstream
 git switch main
 git merge --ff-only upstream/main
-git push personal main
+git push origin main
 ```
+
+Use `origin` only when it is your fork or personal qFoundry repository. If your
+fork remote has another name, substitute that remote. Do not push to the remote
+named `upstream` when it points at `stablyai/orca`.
 
 If the personal repository default branch is not `main`, replace `main` with
 that branch. To update a qFoundry feature branch before merging, fetch upstream

@@ -72,6 +72,66 @@ describe('qfoundry supervisor skill integrity', () => {
     expect(text).toContain('not proof that the work is accepted')
   })
 
+  it('documents hardened approval and coordinator waiting invariants', () => {
+    const text = `${read(skillPath)}\n${read(docsPath)}`
+    for (const required of [
+      'mandatory dispatch precondition',
+      'contract status is exactly `approved`',
+      'approval is explicitly attributable to the user',
+      'a `DEC-*` decision record exists',
+      'any Orca approval gate created for the contract is resolved',
+      'No implementation task',
+      'may be dispatched unless all of these are true',
+      'orca orchestration check --wait',
+      '--types worker_done,escalation,decision_gate',
+      '--timeout-ms <bounded rolling interval>',
+      'Each timeout is a checkpoint, not failure',
+      'inspect task status, dispatch status',
+      'heartbeat',
+      'terminal state'
+    ]) {
+      expect(text).toContain(required)
+    }
+  })
+
+  it('documents Orca completion to qFoundry verdict mapping', () => {
+    const text = `${read(skillPath)}\n${read(docsPath)}`
+    for (const required of [
+      'Orca task status `completed`',
+      'maps only to qFoundry `worker_completed`',
+      'qFoundry `worker_completed`',
+      'qFoundry `under_verification`',
+      'qFoundry `accepted`',
+      '`accepted_with_follow_up`',
+      '`rejected`',
+      '`blocked`',
+      'There is no direct Orca `completed` to qFoundry `accepted` shortcut'
+    ]) {
+      expect(text).toContain(required)
+    }
+  })
+
+  it('documents smoke evidence without treating this integrity test as end-to-end coverage', () => {
+    const text = `${read(skillPath)}\n${read(docsPath)}`
+    for (const required of [
+      'Codex supervisor session',
+      'Antigravity terminal',
+      'active Claude model verified',
+      'model status explicitly recorded as',
+      'injected dispatch',
+      'valid `worker_done`',
+      'supervisor ran independent tests',
+      'deliberate worker defect',
+      'supervisor rejection',
+      'correction dispatch',
+      'restart',
+      'recovery continued from `.qfoundry` state',
+      'Do not claim a live Antigravity or Claude smoke test'
+    ]) {
+      expect(text).toContain(required)
+    }
+  })
+
   it('records source-backed Antigravity facts without overclaiming Claude verification', () => {
     const text = allQFoundryText()
     expect(text).toContain('Canonical Orca agent id: `antigravity`')

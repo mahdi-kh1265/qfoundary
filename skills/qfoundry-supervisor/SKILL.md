@@ -89,6 +89,18 @@ qFoundry task state is separate from Orca task status. At minimum, track:
 Orca may mark a task `completed` after a valid `worker_done`; qFoundry must not
 mark the task `accepted` until supervisor verification passes.
 
+Status mapping:
+
+- Orca task status `completed` means Orca received a valid lifecycle completion
+  signal; it maps only to qFoundry `worker_completed`.
+- qFoundry `worker_completed` means the worker report and `worker_done` are
+  available but have not been independently accepted.
+- qFoundry `under_verification` means the supervisor is independently checking
+  the worker result against requirements, acceptance criteria, and evidence.
+- qFoundry `accepted`, `accepted_with_follow_up`, `rejected`, or `blocked`
+  records the supervisor verdict after independent verification or an explicit
+  blocker. There is no direct Orca `completed` to qFoundry `accepted` shortcut.
+
 ## Phase 1: Preflight
 
 Before editing or dispatching, inspect and record:
@@ -156,6 +168,17 @@ Present the contract and ask for explicit approval. Prefer an Orca decision
 gate or ask/reply flow when available, and also persist the approval in
 `.qfoundry/PROJECT_CONTRACT.md` and `.qfoundry/DECISION_LOG.md`. Silence,
 continuation, or a request for a draft is not approval.
+
+Contract approval is a mandatory dispatch precondition. No implementation task
+may be dispatched unless all of these are true:
+
+- contract status is exactly `approved`
+- approval is explicitly attributable to the user
+- a `DEC-*` decision record exists in `.qfoundry/DECISION_LOG.md`
+- any Orca approval gate created for the contract is resolved
+
+If any condition is missing, keep the task undispatched, record the missing
+evidence, and ask or escalate instead of proceeding.
 
 ## Phase 4: Planning
 
@@ -226,14 +249,15 @@ handle is stale after restart, re-resolve it with `orca terminal list --json`.
 
 For each implementation task:
 
-1. Create a real Orca task.
-2. Verify it appears in `orca orchestration task-list --json`.
-3. Launch or select one worker terminal.
-4. Wait for readiness with `orca terminal wait --for tui-idle --timeout-ms ... --json`.
-5. Dispatch with `orca orchestration dispatch --task <task_id> --to <handle> --inject --json`
+1. Re-check the mandatory contract approval precondition.
+2. Create a real Orca task.
+3. Verify it appears in `orca orchestration task-list --json`.
+4. Launch or select one worker terminal.
+5. Wait for readiness with `orca terminal wait --for tui-idle --timeout-ms ... --json`.
+6. Dispatch with `orca orchestration dispatch --task <task_id> --to <handle> --inject --json`
    when the target is a recognized agent CLI.
-6. Verify the dispatch with `orca orchestration dispatch-show --task <task_id> --json`.
-7. Persist task ID, dispatch ID, worker handle, worktree ID, and qFoundry state.
+7. Verify the dispatch with `orca orchestration dispatch-show --task <task_id> --json`.
+8. Persist task ID, dispatch ID, worker handle, worktree ID, and qFoundry state.
 
 The worker must receive the exact task specification, requirement IDs,
 acceptance criteria, permitted scope, prohibited actions, tests, and reporting
@@ -264,6 +288,21 @@ report must contain:
 For long tasks, require heartbeat messages according to the orchestration
 preamble. Use `ask` for blocking worker questions. Treat wait timeouts as
 checkpoints, not automatic failures.
+
+Use the coordinator waiting workflow with a bounded rolling interval:
+
+```bash
+orca orchestration check --wait
+  --types worker_done,escalation,decision_gate
+  --timeout-ms <bounded rolling interval>
+  --json
+```
+
+Each timeout is a checkpoint, not failure. Before retrying or intervening,
+inspect task status, dispatch status, worker heartbeat history, and terminal
+state. Continue waiting only when evidence shows the worker is still healthy;
+otherwise ask, escalate, block, or recover according to the contract and current
+Orca state.
 
 ## Phase 9: Verification
 
@@ -345,6 +384,29 @@ task failures:
 - block and escalate after repeated verified failures
 - record every manual override in `.qfoundry/DECISION_LOG.md`
 - never invent a missing result
+
+## End-To-End Smoke Evidence
+
+A live qFoundry smoke test is valid only when each evidence item was actually
+observed in a disposable project:
+
+- Codex supervisor session running with `qfoundry-supervisor` loaded
+- Antigravity terminal created from the source-confirmed agent id
+- active Claude model verified, or model status explicitly recorded as
+  `unverified`
+- tracked Orca task created and injected dispatch observed
+- coordinator wait command observed with `worker_done`, `escalation`, or
+  `decision_gate` result handling
+- valid `worker_done` received from the worker terminal for the expected task
+  and dispatch
+- supervisor ran independent tests and inspected their real output
+- deliberate worker defect introduced and supervisor rejection recorded
+- correction dispatch created and verified independently
+- restart performed and recovery continued from `.qfoundry` state without
+  reusing stale handles or dispatch IDs
+
+Do not claim a live Antigravity or Claude smoke test unless these observations
+were actually executed and recorded.
 
 ## First Prompt
 
