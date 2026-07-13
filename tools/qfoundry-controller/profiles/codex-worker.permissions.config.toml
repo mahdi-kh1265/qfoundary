@@ -1,0 +1,43 @@
+# qFoundry Codex worker profile for Codex permission-profile clients.
+#
+# Replace the placeholder workspace root with the active assigned worktree before
+# launching the worker. Do not combine this file with sandbox_mode settings.
+
+default_permissions = "qfoundry-worker"
+approvals_reviewer = "auto_review"
+
+[permissions.qfoundry-worker]
+description = "qFoundry worker: write only the assigned worktree and temp dirs, no outbound network."
+extends = ":workspace"
+
+[permissions.qfoundry-worker.workspace_roots]
+"/ABSOLUTE/PATH/TO/ASSIGNED/WORKTREE" = true
+
+[permissions.qfoundry-worker.filesystem]
+":minimal" = "read"
+"~/.ssh" = "deny"
+"~/.aws" = "deny"
+"~/.azure" = "deny"
+"~/.config/gh" = "deny"
+"~/.docker" = "deny"
+
+[permissions.qfoundry-worker.filesystem.":workspace_roots"]
+"." = "write"
+".git" = "read"
+".codex" = "read"
+".devcontainer" = "read"
+".env" = "deny"
+".env.*" = "deny"
+"**/*.env" = "deny"
+"**/*.pem" = "deny"
+"**/*.key" = "deny"
+"**/*secret*" = "deny"
+"**/*credential*" = "deny"
+
+[permissions.qfoundry-worker.network]
+enabled = false
+
+[apps._default]
+open_world_enabled = false
+destructive_enabled = false
+approvals_reviewer = "auto_review"

@@ -51,3 +51,11 @@ policy.
 Use Manual agent permissions for qFoundry projects unless the approved contract
 names a narrower exception. Do not recommend global permission bypass as the
 default operating mode.
+
+For Phase 2A Codex workers, prefer the scoped permission-profile example in
+`tools/qfoundry-controller/profiles/codex-worker.permissions.config.toml` when
+the installed Codex version supports permission profiles. Use
+`tools/qfoundry-controller/profiles/codex-worker.compat.config.toml` as the
+documented `workspace-write` / `on-request` compatibility fallback. Codex
+automatic approval review handles low-level sandbox boundary requests; qFoundry
+supervisor acceptance remains a separate verification verdict.

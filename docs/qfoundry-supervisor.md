@@ -195,6 +195,37 @@ If the installed CLI rejects agent-first worktree creation or `--inject`, follow
 the current `orca-cli` and `orchestration` skill guidance and record the
 limitation in `.qfoundry/PROJECT_STATE.md`.
 
+## Phase 2A Controller
+
+The additive Phase 2A sidecar lives at `tools/qfoundry-controller/`. It provides
+an executable controller loop over the same qFoundry lifecycle without changing
+Orca runtime or UI internals.
+
+Use it when a project has an approved contract and a prepared
+`.qfoundry/controller-state.json`:
+
+```bash
+node tools/qfoundry-controller/bin/qfoundry-controller.mjs run \
+  --project /absolute/path/to/project \
+  --state .qfoundry/controller-state.json \
+  --orca orca \
+  --review-command /absolute/path/to/reviewer \
+  --wait-timeout-ms 900000 \
+  --max-correction-rounds 3
+```
+
+The controller:
+
+- creates tracked Orca tasks and injected dispatches through JSON CLI calls;
+- uses exact terminal handles, not `@codex` group routing;
+- treats bounded wait timeouts as checkpoints;
+- moves `worker_done` only to `worker_completed`;
+- runs independent supervisor review before acceptance;
+- creates fresh correction dispatches after rejection;
+- blocks after the configured correction retry limit;
+- persists progress under `.qfoundry/controller-state.json` so a restarted
+  controller can continue from recorded evidence.
+
 ## Worker Completion
 
 Workers must write a report and send exactly one `worker_done` from their own
@@ -213,7 +244,8 @@ Status mapping:
   but supervisor acceptance has not happened.
 - qFoundry `under_verification` means the supervisor is independently checking
   files, diff, tests, requirements, and acceptance criteria.
-- qFoundry `accepted`, `rejected`, or `blocked` is the supervisor verdict after
+- qFoundry `accepted`, `accepted_with_follow_up`, `rejected`,
+  `blocked_pending_user_decision`, or `failed` is the supervisor verdict after
   verification or an explicit blocker. `accepted_with_follow_up` is allowed only
   when acceptance criteria passed and follow-up work is tracked separately.
 

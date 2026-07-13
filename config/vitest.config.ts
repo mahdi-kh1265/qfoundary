@@ -19,6 +19,7 @@ export default defineConfig({
       'src/**/*.test.ts',
       'src/**/*.test.tsx',
       'config/scripts/**/*.test.mjs',
+      'tools/qfoundry-controller/**/*.test.mjs',
       'tests/e2e/**/*.unit.test.ts'
     ],
     // Why: the full suite runs heavy TS transforms plus real git/http fixtures;

@@ -34,13 +34,16 @@ Last verified timestamp: `[YYYY-MM-DDTHH:MM:SSZ or unknown]`
 Allowed qFoundry statuses:
 
 - `planned`
+- `ready`
 - `dispatched`
 - `worker_completed`
 - `under_verification`
 - `accepted`
 - `accepted_with_follow_up`
 - `rejected`
-- `blocked`
+- `correction_dispatched`
+- `blocked_pending_user_decision`
+- `failed`
 - `abandoned`
 
 ## Correction Tasks

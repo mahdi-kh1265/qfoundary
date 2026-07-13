@@ -1,0 +1,8 @@
+{
+  "name": "@qfoundry/orca-controller",
+  "private": true,
+  "bin": {
+    "qfoundry-controller": "./bin/qfoundry-controller.mjs"
+  },
+  "type": "module"
+}

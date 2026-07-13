@@ -1,0 +1,21 @@
+# Compatibility profile for Codex clients that do not support permission profiles.
+#
+# Launch the worker with --cd pointing at the assigned worktree and do not pass
+# --add-dir for unrelated repositories or credential locations.
+
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
+
+[sandbox_workspace_write]
+network_access = false
+writable_roots = []
+
+[apps._default]
+open_world_enabled = false
+destructive_enabled = false
+approvals_reviewer = "auto_review"
+
+[shell_environment_policy]
+inherit = "core"
+exclude = ["*KEY*", "*SECRET*", "*TOKEN*", "*PASSWORD*", "GITHUB_*", "AWS_*", "AZURE_*"]

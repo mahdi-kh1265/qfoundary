@@ -59,9 +59,13 @@ describe('qfoundry supervisor skill integrity', () => {
       'AC-001',
       'explicit approval',
       'worker_done',
+      'ready',
       'under_verification',
       'accepted_with_follow_up',
       'rejected',
+      'correction_dispatched',
+      'blocked_pending_user_decision',
+      'failed',
       'orca orchestration task-create',
       'orca orchestration dispatch',
       '--inject'
@@ -104,8 +108,26 @@ describe('qfoundry supervisor skill integrity', () => {
       'qFoundry `accepted`',
       '`accepted_with_follow_up`',
       '`rejected`',
-      '`blocked`',
-      'There is no direct Orca `completed` to qFoundry `accepted` shortcut'
+      '`blocked_pending_user_decision`',
+      '`failed`',
+      'There is no direct',
+      'Orca `completed` to qFoundry `accepted` shortcut'
+    ]) {
+      expect(text).toContain(required)
+    }
+  })
+
+  it('documents the Phase 2A controller without replacing the live smoke standard', () => {
+    const text = read(docsPath)
+    for (const required of [
+      'tools/qfoundry-controller/',
+      '.qfoundry/controller-state.json',
+      'uses exact terminal handles',
+      'not `@codex` group routing',
+      'moves `worker_done` only to `worker_completed`',
+      'runs independent supervisor review before acceptance',
+      'creates fresh correction dispatches after rejection',
+      'persists progress under `.qfoundry/controller-state.json`'
     ]) {
       expect(text).toContain(required)
     }

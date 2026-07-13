@@ -77,13 +77,16 @@ Use the reference templates in `references/`:
 qFoundry task state is separate from Orca task status. At minimum, track:
 
 - `planned`
+- `ready`
 - `dispatched`
 - `worker_completed`
 - `under_verification`
 - `accepted`
 - `accepted_with_follow_up`
 - `rejected`
-- `blocked`
+- `correction_dispatched`
+- `blocked_pending_user_decision`
+- `failed`
 - `abandoned`
 
 Orca may mark a task `completed` after a valid `worker_done`; qFoundry must not
@@ -97,9 +100,10 @@ Status mapping:
   available but have not been independently accepted.
 - qFoundry `under_verification` means the supervisor is independently checking
   the worker result against requirements, acceptance criteria, and evidence.
-- qFoundry `accepted`, `accepted_with_follow_up`, `rejected`, or `blocked`
-  records the supervisor verdict after independent verification or an explicit
-  blocker. There is no direct Orca `completed` to qFoundry `accepted` shortcut.
+- qFoundry `accepted`, `accepted_with_follow_up`, `rejected`,
+  `blocked_pending_user_decision`, or `failed` records the supervisor verdict
+  after independent verification or an explicit blocker. There is no direct
+  Orca `completed` to qFoundry `accepted` shortcut.
 
 ## Phase 1: Preflight
 
