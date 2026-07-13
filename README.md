@@ -1,4 +1,4 @@
-# qFoundary
+# qFoundary x orca
 
 Personal experimental workspace for the qFoundry Supervisor skill, built on top
 of the Orca source tree.
