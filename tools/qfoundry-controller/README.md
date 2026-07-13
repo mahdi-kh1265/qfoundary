@@ -59,7 +59,9 @@ Launch one autonomous supervised run:
 node tools/qfoundry-controller/bin/qfoundry-controller.mjs run \
   --project /absolute/path/to/project \
   --state .qfoundry/controller-state.json \
-  --orca orca \
+  --orca node \
+  --orca-arg /absolute/path/to/orca/out/cli/index.js \
+  --from-terminal term_supervisor \
   --review-command qfoundry-codex-reviewer \
   --review-arg --project \
   --review-arg /absolute/path/to/project \
@@ -234,6 +236,8 @@ Preferred profile: `profiles/codex-worker.permissions.config.toml`.
 - Disables outbound network by default.
 - Uses `approvals_reviewer = "auto_review"` for eligible sandbox-boundary
   requests.
+- Marks only the assigned repository/worktree roots as trusted so autonomous
+  workers do not block on first-run workspace trust prompts.
 
 Compatibility profile: `profiles/codex-worker.compat.config.toml`.
 
@@ -254,6 +258,26 @@ permission profile template with the assigned worktree root, preflights the
 installed Codex CLI for `--profile`/`--cd` support, records the profile path and
 SHA-256, then creates an Orca terminal whose command launches Codex with that
 profile. The launch path refuses commands containing sandbox-bypass flags.
+
+On Windows, the installed `orca.cmd` launcher may not be spawnable by the
+controller's no-shell subprocess runner. Use `--orca node --orca-arg
+/absolute/path/to/out/cli/index.js` or another real executable plus
+`--orca-arg` prefix instead of relying on a `.cmd` shim.
+
+When the controller runs outside an Orca terminal, pass `--from-terminal` or set
+`settings.coordinatorTerminalHandle` to a live coordinator terminal handle so
+Orca can attribute `dispatch` and `reply` messages.
+
+If a live Orca/Codex combination stages injected dispatch text as an idle draft,
+set `settings.submitInjectedDispatchEnter` to `true`. On the next dispatched
+step, the controller sends one Enter to the worker terminal, records
+`injectedDispatchSubmittedAt`, and will not repeat it after restart.
+
+If a project-local `CODEX_HOME` cannot authenticate, set
+`"useAuthenticatedCodexHome": true` on the worker. That writes only the
+generated qFoundry profile into the already-authenticated Codex home and records
+the auth boundary in `profileEvidence`; it does not copy credentials into the
+project.
 
 ## Test Evidence
 

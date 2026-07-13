@@ -30,12 +30,16 @@ export function parseJsonOutput(stdout, commandLine) {
 export class OrcaJsonCli {
   constructor({
     command = 'orca',
+    commandArgs = [],
+    fromTerminal,
     cwd = process.cwd(),
     env = process.env,
     timeoutMs = 60_000,
     maxOutputBytes = 128_000
   } = {}) {
     this.command = command
+    this.commandArgs = commandArgs
+    this.fromTerminal = fromTerminal
     this.cwd = cwd
     this.env = env
     this.timeoutMs = timeoutMs
@@ -43,10 +47,11 @@ export class OrcaJsonCli {
   }
 
   async runJson(args, options = {}) {
-    const commandLine = `${this.command} ${args.join(' ')}`
+    const allArgs = [...this.commandArgs, ...args]
+    const commandLine = `${this.command} ${allArgs.join(' ')}`
     const result = await runProcess({
       command: this.command,
-      args,
+      args: allArgs,
       cwd: options.cwd ?? this.cwd,
       env: options.env ?? this.env,
       timeoutMs: options.timeoutMs ?? this.timeoutMs,
@@ -82,7 +87,7 @@ export class OrcaJsonCli {
     const result = await this.runJson(['orchestration', 'task-create', '--spec', spec, '--json'])
     return {
       raw: result,
-      taskId: firstString(result, ['task.id', 'task.taskId', 'taskId', 'id'])
+      taskId: firstString(result, ['result.task.id', 'task.id', 'task.taskId', 'taskId', 'id'])
     }
   }
 
@@ -100,11 +105,12 @@ export class OrcaJsonCli {
       args.push('--agent', agentId)
     }
     args.push('--json')
-    return await this.runJson(args)
+    const result = await this.runJson(args)
+    return result.result ?? result
   }
 
   async terminalCreate({ worktree, title, command }) {
-    return await this.runJson([
+    const result = await this.runJson([
       'terminal',
       'create',
       '--worktree',
@@ -115,6 +121,7 @@ export class OrcaJsonCli {
       command,
       '--json'
     ])
+    return result.result ?? result
   }
 
   async terminalWait(handle, timeoutMs = 60_000) {
@@ -131,20 +138,25 @@ export class OrcaJsonCli {
     ])
   }
 
+  async terminalSendEnter(handle) {
+    return await this.runJson(['terminal', 'send', '--terminal', handle, '--enter', '--json'])
+  }
+
   async dispatch(taskId, terminalHandle) {
-    const result = await this.runJson([
-      'orchestration',
-      'dispatch',
-      '--task',
-      taskId,
-      '--to',
-      terminalHandle,
-      '--inject',
-      '--json'
-    ])
+    const args = ['orchestration', 'dispatch', '--task', taskId, '--to', terminalHandle]
+    if (this.fromTerminal) {
+      args.push('--from', this.fromTerminal)
+    }
+    args.push('--inject', '--json')
+    const result = await this.runJson(args)
     return {
       raw: result,
       dispatchId: firstString(result, [
+        'result.dispatch.id',
+        'result.dispatch.dispatchId',
+        'result.dispatchId',
+        'result.context.dispatchId',
+        'result.context.id',
         'dispatch.id',
         'dispatch.dispatchId',
         'dispatchId',
@@ -160,34 +172,38 @@ export class OrcaJsonCli {
   }
 
   async checkWait(timeoutMs) {
-    return await this.runJson([
+    const args = [
       'orchestration',
       'check',
       '--wait',
       '--types',
       'worker_done,escalation,decision_gate',
       '--timeout-ms',
-      String(timeoutMs),
-      '--json'
-    ])
+      String(timeoutMs)
+    ]
+    if (this.fromTerminal) {
+      args.push('--terminal', this.fromTerminal)
+    }
+    args.push('--json')
+    return await this.runJson(args, { timeoutMs: timeoutMs + 30_000 })
   }
 
   async reply(messageId, body) {
-    return await this.runJson([
-      'orchestration',
-      'reply',
-      '--id',
-      messageId,
-      '--body',
-      body,
-      '--json'
-    ])
+    const args = ['orchestration', 'reply', '--id', messageId, '--body', body]
+    if (this.fromTerminal) {
+      args.push('--from', this.fromTerminal)
+    }
+    args.push('--json')
+    return await this.runJson(args)
   }
 }
 
 export function extractMessages(result) {
   if (Array.isArray(result)) {
     return result
+  }
+  if (result.result) {
+    return extractMessages(result.result)
   }
   if (Array.isArray(result.messages)) {
     return result.messages
@@ -202,6 +218,9 @@ export function extractMessages(result) {
 }
 
 export function extractStartupTerminal(result) {
+  if (result?.result) {
+    return extractStartupTerminal(result.result)
+  }
   return (
     result.startupTerminal ??
     result.worktree?.startupTerminal ??

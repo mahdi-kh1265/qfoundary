@@ -105,6 +105,7 @@ class FakeOrca {
     this.queue = []
     this.replies = []
     this.calls = []
+    this.terminalSends = []
     this.terminals = [{ handle: 'term-old', cwd: projectRoot, agentId: 'codex' }]
   }
 
@@ -128,7 +129,16 @@ class FakeOrca {
 
   async terminalWait(handle) {
     this.calls.push({ name: 'terminalWait', handle })
+    if (this.terminalWaitResult) {
+      return this.terminalWaitResult
+    }
     return { handle, ready: true }
+  }
+
+  async terminalSendEnter(handle) {
+    this.terminalSends.push({ handle, enter: true })
+    this.calls.push({ name: 'terminalSendEnter', handle })
+    return { send: { accepted: true } }
   }
 
   async worktreeCreate({ name, agentId }) {
@@ -431,5 +441,58 @@ describe('qFoundry controller loop', () => {
         reason: 'timeout'
       })
     ])
+  })
+
+  it('submits a staged injected dispatch draft once after restart when configured', async () => {
+    const projectRoot = makeTempProject()
+    const orca = new FakeOrca(projectRoot)
+    const state = approvedState(projectRoot, {
+      settings: { submitInjectedDispatchEnter: true }
+    })
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+
+    expect(orca.terminalSends).toEqual([{ handle: 'term-old', enter: true }])
+    expect(state.tasks[0].injectedDispatchSubmittedAt).toBeTruthy()
+    expect(state.tasks[0].injectedDispatchSubmittedForDispatchId).toBe('ctx_1')
+    expect(state.lifecycleEvents.map((event) => event.result)).toContain(
+      'injected_dispatch_submitted'
+    )
+  })
+
+  it('does not treat a stale injected-dispatch timestamp as current dispatch submission', async () => {
+    const projectRoot = makeTempProject()
+    const orca = new FakeOrca(projectRoot)
+    const state = approvedState(projectRoot, {
+      settings: { submitInjectedDispatchEnter: true }
+    })
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+    state.tasks[0].injectedDispatchSubmittedAt = '2026-01-01T00:00:00.000Z'
+    state.tasks[0].injectedDispatchSubmittedForDispatchId = 'ctx_old'
+
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+
+    expect(orca.terminalSends).toEqual([{ handle: 'term-old', enter: true }])
+    expect(state.tasks[0].injectedDispatchSubmittedForDispatchId).toBe('ctx_1')
+  })
+
+  it('does not send Enter when injected dispatch is already running', async () => {
+    const projectRoot = makeTempProject()
+    const orca = new FakeOrca(projectRoot)
+    orca.terminalWaitResult = { result: { wait: { satisfied: false, status: 'running' } } }
+    const state = approvedState(projectRoot, {
+      settings: { submitInjectedDispatchEnter: true }
+    })
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+
+    expect(orca.terminalSends).toEqual([])
+    expect(state.tasks[0].injectedDispatchSubmittedForDispatchId).toBe('ctx_1')
+    expect(state.lifecycleEvents.map((event) => event.result)).toContain(
+      'injected_dispatch_already_running'
+    )
   })
 })

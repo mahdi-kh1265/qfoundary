@@ -14,7 +14,9 @@ export const REVIEW_OUTPUT_SCHEMA = Object.freeze({
     'failedRequirements',
     'failedAcceptanceCriteria',
     'testsRun',
-    'evidence'
+    'evidence',
+    'followUp',
+    'expectedCorrection'
   ],
   properties: {
     verdict: { type: 'string', enum: REVIEW_VERDICTS },

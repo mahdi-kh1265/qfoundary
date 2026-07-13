@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -18,8 +19,35 @@ function shQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`
 }
 
+function tomlString(value) {
+  return JSON.stringify(String(value))
+}
+
+function uniqueResolvedPaths(paths) {
+  return [...new Set(paths.filter(Boolean).map((item) => path.resolve(item)))]
+}
+
+function trustedProjectTables(paths) {
+  return uniqueResolvedPaths(paths)
+    .map((projectPath) =>
+      [`[projects.${tomlString(projectPath)}]`, 'trust_level = "trusted"'].join('\n')
+    )
+    .join('\n\n')
+}
+
 function codexCommandFromEnv() {
   return process.env.QFOUNDRY_CODEX_CLI ?? process.env.CODEX_CLI_PATH ?? 'codex'
+}
+
+function resolveProfileHome(projectRoot, worker) {
+  if (worker.useAuthenticatedCodexHome === true) {
+    return path.resolve(process.env.CODEX_HOME ?? path.join(homedir(), '.codex'))
+  }
+  return resolveQFoundryPath(
+    projectRoot,
+    worker.codexHome ?? path.join('.qfoundry', 'codex-worker-home'),
+    'Codex worker profile home'
+  )
 }
 
 export function buildWorkerLaunchCommand({
@@ -61,18 +89,19 @@ export async function prepareCodexWorkerProfile({
   const profileName = task.worker.profileName ?? 'qfoundry-worker'
   const codexCommand = task.worker.codexCommand ?? codexCommandFromEnv()
   const codexCommandArgs = task.worker.codexCommandArgs ?? []
-  const profileHome = resolveQFoundryPath(
-    projectRoot,
-    task.worker.codexHome ?? path.join('.qfoundry', 'codex-worker-home'),
-    'Codex worker profile home'
-  )
+  const profileHome = resolveProfileHome(projectRoot, task.worker)
   await mkdir(profileHome, { recursive: true })
   const templatePath =
     task.worker.profileTemplatePath ??
     path.join(controllerRoot, 'profiles', 'codex-worker.permissions.config.toml')
   const template = await readFile(templatePath, 'utf8')
   const normalizedWorktree = path.resolve(worktreePath).replaceAll('\\', '/')
-  const profileText = template.replaceAll('/ABSOLUTE/PATH/TO/ASSIGNED/WORKTREE', normalizedWorktree)
+  const trustedProjectRoots = uniqueResolvedPaths([projectRoot, worktreePath])
+  const profileText = [
+    template.replaceAll('/ABSOLUTE/PATH/TO/ASSIGNED/WORKTREE', normalizedWorktree).trimEnd(),
+    '# qFoundry trusts only the assigned repository/worktree roots for autonomous worker startup.',
+    trustedProjectTables(trustedProjectRoots)
+  ].join('\n\n')
   const profilePath = path.join(profileHome, `${profileName}.config.toml`)
   await writeFile(profilePath, profileText, 'utf8')
   const help = await runProcess({
@@ -109,7 +138,12 @@ export async function prepareCodexWorkerProfile({
     profilePath,
     profileSha256: sha256Text(profileText),
     worktreePath: path.resolve(worktreePath),
+    trustedProjectRoots,
     launchCommand,
+    authBoundary:
+      task.worker.useAuthenticatedCodexHome === true
+        ? 'uses existing authenticated Codex home for auth; no credentials copied into project state'
+        : 'uses project-local Codex home; requires independent authentication',
     preflight: {
       checkedAt: now().toISOString(),
       supportsProfile: help.stdout.includes('--profile'),

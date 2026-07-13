@@ -3,6 +3,7 @@ import path from 'node:path'
 import { answerPendingDecision, createPendingDecision } from './decision-store.mjs'
 import { extractMessages, extractStartupTerminal } from './orca-json-cli.mjs'
 import { captureDispatchBaseline } from './git-evidence.mjs'
+import { messagePayload } from './message-payload.mjs'
 import { senderTerminalHandle, validateLifecycleProvenance } from './message-provenance.mjs'
 import { saveControllerState } from './state-store.mjs'
 import {
@@ -13,6 +14,12 @@ import {
 import { buildTaskReview } from './review-flow.mjs'
 import { writeReviewReport } from './reviewer.mjs'
 import { prepareCodexWorkerProfile } from './worker-profile.mjs'
+import {
+  allTerminals,
+  bestMatchingTerminal,
+  shouldKeepCurrentTerminal,
+  taskWorktreePath
+} from './terminal-selection.mjs'
 
 const CONTROLLER_ROOT = path.resolve(import.meta.dirname, '..')
 const REVIEW_VERDICTS = new Set([
@@ -28,30 +35,9 @@ function messageId(message) {
   )
 }
 
-function messagePayload(message) {
-  return message.payload && typeof message.payload === 'object' ? message.payload : message
-}
-
 function sameLifecycleTarget(task, message) {
   const payload = messagePayload(message)
   return payload.taskId === task.orcaTaskId && payload.dispatchId === task.dispatchId
-}
-
-function allTerminals(raw) {
-  return [raw, raw?.terminals, raw?.items].find((candidate) => Array.isArray(candidate)) ?? []
-}
-
-function taskWorktreePath(task) {
-  return task.worktree?.path ?? task.worker?.worktreePath ?? task.worktreePath
-}
-
-function terminalMatchesTask(terminal, task) {
-  const terminalPath = terminal.cwd ?? terminal.path ?? terminal.worktreePath
-  const expectedPath = taskWorktreePath(task)
-  if (!expectedPath || !terminalPath) {
-    return false
-  }
-  return path.resolve(terminalPath).toLowerCase() === path.resolve(expectedPath).toLowerCase()
 }
 
 function buildTaskSpec(state, task) {
@@ -198,11 +184,12 @@ export class QFoundryController {
     const terminals = allTerminals(await this.orca.terminalList())
     const currentHandle = task.worker?.terminalHandle
     const current = terminals.find((terminal) => terminal.handle === currentHandle)
-    if (current) {
+    const bestMatch = bestMatchingTerminal(terminals, task)
+    if (current && shouldKeepCurrentTerminal(current, bestMatch, task)) {
       await this.orca.terminalWait(current.handle)
       return current.handle
     }
-    const replacement = terminals.find((terminal) => terminalMatchesTask(terminal, task))
+    const replacement = bestMatch
     if (replacement?.handle) {
       task.worker ??= {}
       task.worker.previousTerminalHandle = currentHandle
@@ -267,6 +254,7 @@ export class QFoundryController {
   }
 
   async waitForLifecycleEvent() {
+    await this.submitInjectedDispatchDraftIfNeeded()
     const result = await this.orca.checkWait(this.state.settings.waitTimeoutMs)
     const messages = extractMessages(result)
     if (messages.length === 0) {
@@ -277,6 +265,41 @@ export class QFoundryController {
     for (const message of messages) {
       await this.processLifecycleMessage(message)
     }
+  }
+
+  async submitInjectedDispatchDraftIfNeeded() {
+    if (this.state.settings.submitInjectedDispatchEnter !== true) {
+      return
+    }
+    const activeTask = this.state.tasks.find((task) => task.status === 'dispatched')
+    if (
+      !activeTask ||
+      activeTask.injectedDispatchSubmittedForDispatchId === activeTask.dispatchId
+    ) {
+      return
+    }
+    const terminalHandle = activeTask.worker?.terminalHandle
+    if (!terminalHandle) {
+      throw new Error(
+        `cannot submit injected dispatch draft without terminal handle for ${activeTask.id}`
+      )
+    }
+    const waitResult = await this.orca.terminalWait(terminalHandle, 1000)
+    const wait = waitResult?.result?.wait ?? waitResult?.wait ?? waitResult
+    let result = 'injected_dispatch_already_running'
+    if (wait?.satisfied !== false) {
+      await this.orca.terminalSendEnter(terminalHandle)
+      result = 'injected_dispatch_submitted'
+    }
+    activeTask.injectedDispatchSubmittedAt = this.now().toISOString()
+    activeTask.injectedDispatchSubmittedForDispatchId = activeTask.dispatchId
+    this.state.lifecycleEvents.push({
+      at: activeTask.injectedDispatchSubmittedAt,
+      result,
+      taskId: activeTask.id,
+      dispatchId: activeTask.dispatchId,
+      terminalHandle
+    })
   }
 
   async inspectActiveDispatches() {
@@ -578,6 +601,10 @@ export class QFoundryController {
       verificationEvidence: null,
       transitions: [],
       corrections: undefined,
+      injectedDispatchSubmittedAt: null,
+      injectedDispatchSubmittedForDispatchId: null,
+      lastDispatchInspection: null,
+      lastDispatchInspectionError: null,
       correctionInstructions: {
         rejectedTaskId: rejectedTask.id,
         failedRequirements: review.failedRequirements ?? [],

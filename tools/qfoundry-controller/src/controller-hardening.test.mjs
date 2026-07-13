@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { QFoundryController } from './controller.mjs'
 import { captureDispatchBaseline, collectGitEvidence } from './git-evidence.mjs'
+import { OrcaJsonCli, extractMessages, extractStartupTerminal } from './orca-json-cli.mjs'
 import { runProcess } from './process-runner.mjs'
 import { CommandReviewer, readWorkerReport } from './reviewer.mjs'
 import { isFinalQFoundryState } from './state-machine.mjs'
@@ -106,6 +107,7 @@ class FakeOrca {
     this.queue = []
     this.replies = []
     this.calls = []
+    this.terminalSends = []
     this.terminals = [{ handle: 'term-old', cwd: projectRoot, agentId: 'codex' }]
   }
 
@@ -126,6 +128,12 @@ class FakeOrca {
 
   async terminalWait(handle) {
     return { handle, ready: true }
+  }
+
+  async terminalSendEnter(handle) {
+    this.terminalSends.push({ handle, enter: true })
+    this.calls.push({ name: 'terminalSendEnter', handle })
+    return { send: { accepted: true } }
   }
 
   async worktreeCreate({ name, agentId }) {
@@ -177,6 +185,18 @@ class ConstantReviewer {
       testsRun: ['simulated reviewer'],
       evidence: [`reviewer returned ${this.verdict}`]
     }
+  }
+}
+
+class RecordingReviewer extends ConstantReviewer {
+  constructor(verdict) {
+    super(verdict)
+    this.calls = []
+  }
+
+  async review(input) {
+    this.calls.push(input)
+    return await super.review(input)
   }
 }
 
@@ -323,6 +343,34 @@ describe('qFoundry controller hardening', () => {
     )
   })
 
+  it('still invokes reviewer evidence on failed deterministic verification before rejecting', async () => {
+    const projectRoot = makeTempProject()
+    const orca = new FakeOrca(projectRoot)
+    const reviewer = new RecordingReviewer('accepted')
+    const state = approvedState(projectRoot)
+    await runWithState(projectRoot, state, orca, reviewer, 1)
+    writeFileSync(
+      path.join(projectRoot, 'csv.mjs'),
+      'export function escapeCsv(value) { return String(value) }\n',
+      'utf8'
+    )
+    writeFileSync(path.join(projectRoot, '.qfoundry', 'reports', 'worker.md'), 'done\n', 'utf8')
+    orca.queue.push({ messages: [workerDone('done-failed-verification', 'task_1', 'ctx_1')] })
+
+    await runWithState(projectRoot, state, orca, reviewer, 1)
+
+    expect(reviewer.calls).toHaveLength(1)
+    expect(reviewer.calls[0].verificationEvidence.ok).toBe(false)
+    expect(state.tasks[0].status).toBe('correction_dispatched')
+    expect(state.tasks[0].lastReview.verdict).toBe('rejected')
+    expect(state.tasks[0].lastReview.evidence).toContain('reviewer returned accepted')
+    expect(
+      state.tasks[0].lastReview.evidence.some((item) =>
+        item.includes('verification command 1 exited')
+      )
+    ).toBe(true)
+  })
+
   it('rejects worker_done with mismatched sender handle without accepting the task', async () => {
     const projectRoot = makeTempProject()
     const orca = new FakeOrca(projectRoot)
@@ -340,6 +388,42 @@ describe('qFoundry controller hardening', () => {
     expect(state.lifecycleEvents.map((event) => event.result)).toContain(
       'worker_done_provenance_rejected'
     )
+  })
+
+  it('accepts lifecycle payloads serialized as JSON strings by Orca', async () => {
+    const projectRoot = makeTempProject()
+    const orca = new FakeOrca(projectRoot)
+    const state = approvedState(projectRoot)
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+    writeFileSync(
+      path.join(projectRoot, 'csv.mjs'),
+      `export function escapeCsv(value) {
+  const text = String(value)
+  return /[",\\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text
+}
+`,
+      'utf8'
+    )
+    writeFileSync(path.join(projectRoot, '.qfoundry', 'reports', 'worker.md'), 'done\n', 'utf8')
+    orca.queue.push({
+      messages: [
+        {
+          id: 'json-payload-done',
+          type: 'worker_done',
+          from_handle: 'term-old',
+          payload: JSON.stringify({
+            taskId: 'task_1',
+            dispatchId: 'ctx_1',
+            reportPath: '.qfoundry/reports/worker.md'
+          })
+        }
+      ]
+    })
+
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+
+    expect(state.tasks[0].status).toBe('accepted')
+    expect(state.tasks[0].workerDoneProvenance.senderTerminalHandle).toBe('term-old')
   })
 
   it('rejects stale worker questions', async () => {
@@ -430,6 +514,142 @@ describe('qFoundry controller hardening', () => {
     expect(terminalCreate.command).toContain('qfoundry-worker')
     expect(readFileSync(state.tasks[0].worker.profileEvidence.profilePath, 'utf8')).toContain(
       projectRoot.replaceAll('\\', '/')
+    )
+    expect(readFileSync(state.tasks[0].worker.profileEvidence.profilePath, 'utf8')).toContain(
+      `[projects.${JSON.stringify(path.resolve(projectRoot))}]`
+    )
+    expect(state.tasks[0].worker.profileEvidence.trustedProjectRoots).toContain(
+      path.resolve(projectRoot)
+    )
+  })
+
+  it('unwraps live Orca result envelopes for terminal lists, messages, and startup terminals', async () => {
+    const projectRoot = makeTempProject()
+    const orca = new FakeOrca(projectRoot)
+    orca.terminalList = async () => ({
+      result: { terminals: [{ handle: 'term-live', cwd: projectRoot, agentId: 'codex' }] }
+    })
+    const state = approvedState(projectRoot, {
+      task: { worker: { agentId: 'codex', terminalHandle: 'term-live' } }
+    })
+
+    await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+
+    expect(state.tasks[0].status).toBe('dispatched')
+    expect(orca.dispatches[0].terminalHandle).toBe('term-live')
+    expect(extractMessages({ result: { messages: [{ id: 'message-live' }] } })).toEqual([
+      { id: 'message-live' }
+    ])
+    expect(
+      extractStartupTerminal({ result: { terminal: { handle: 'term-created-live' } } })
+    ).toEqual({ handle: 'term-created-live' })
+  })
+
+  it('supports an executable plus Orca CLI prefix args without shell interpolation', async () => {
+    const projectRoot = makeTempProject()
+    const cli = new OrcaJsonCli({
+      command: process.execPath,
+      commandArgs: ['-e', 'console.log(JSON.stringify({argv:process.argv.slice(1)}))'],
+      cwd: projectRoot
+    })
+    const result = await cli.status()
+    expect(result.argv).toEqual(['status', '--json'])
+  })
+
+  it('prefers a recovered Codex pane over a shell terminal in the same worktree', async () => {
+    const projectRoot = makeTempProject()
+    const orca = new FakeOrca(projectRoot)
+    orca.terminals = [
+      {
+        handle: 'term-shell',
+        cwd: projectRoot,
+        title: 'Terminal 1',
+        preview: `PS ${projectRoot}>`,
+        connected: true,
+        writable: true,
+        lastOutputAt: 20
+      },
+      {
+        handle: 'term-codex',
+        cwd: projectRoot,
+        title: 'qFoundry QF-TASK-001',
+        preview: 'Use /skills to list available skills gpt-5.5 xhigh',
+        connected: true,
+        writable: true,
+        lastOutputAt: 10
+      }
+    ]
+    const state = approvedState(projectRoot, {
+      task: {
+        worker: { agentId: 'codex', terminalHandle: 'term-stale', worktreePath: projectRoot }
+      }
+    })
+
+    const next = await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+
+    expect(next.tasks[0].status).toBe('dispatched')
+    expect(next.tasks[0].worker.terminalHandle).toBe('term-codex')
+    expect(next.tasks[0].worker.previousTerminalHandle).toBe('term-stale')
+    expect(orca.dispatches[0].terminalHandle).toBe('term-codex')
+  })
+
+  it('passes an explicit coordinator terminal handle for Orca dispatch and wait attribution', async () => {
+    const projectRoot = makeTempProject()
+    const cli = new OrcaJsonCli({
+      command: process.execPath,
+      commandArgs: [
+        '-e',
+        'console.log(JSON.stringify({dispatch:{id:"ctx-live"},messages:[],argv:process.argv.slice(1)}))'
+      ],
+      fromTerminal: 'term-supervisor',
+      cwd: projectRoot
+    })
+
+    const dispatch = await cli.dispatch('task-live', 'term-worker')
+    const wait = await cli.checkWait(1000)
+
+    expect(dispatch.dispatchId).toBe('ctx-live')
+    expect(dispatch.raw.argv).toContain('--from')
+    expect(dispatch.raw.argv).toContain('term-supervisor')
+    expect(wait.argv).toContain('--terminal')
+    expect(wait.argv).toContain('term-supervisor')
+  })
+
+  it('can place the generated worker profile in an authenticated Codex home by explicit opt-in', async () => {
+    const projectRoot = makeTempProject()
+    const codexMock = makeCodexHelpMock(projectRoot)
+    const authHome = path.join(projectRoot, '.codex-auth-home')
+    const orca = new FakeOrca(projectRoot)
+    orca.terminals = []
+    const state = approvedState(projectRoot, {
+      task: {
+        worktree: {},
+        worker: {
+          agentId: 'qfoundry-codex-worker',
+          create: true,
+          worktreeName: 'qf-auth-worker',
+          codexCommand: codexMock.command,
+          codexCommandArgs: codexMock.args,
+          useAuthenticatedCodexHome: true
+        }
+      }
+    })
+    const oldCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = authHome
+    try {
+      await runWithState(projectRoot, state, orca, new ConstantReviewer('accepted'), 1)
+    } finally {
+      if (oldCodexHome) {
+        process.env.CODEX_HOME = oldCodexHome
+      } else {
+        delete process.env.CODEX_HOME
+      }
+    }
+    expect(state.tasks[0].worker.profileEvidence.profilePath).toBe(
+      path.join(authHome, 'qfoundry-worker.config.toml')
+    )
+    expect(state.tasks[0].worker.profileEvidence.authBoundary).toContain(
+      'existing authenticated Codex home'
     )
   })
 })

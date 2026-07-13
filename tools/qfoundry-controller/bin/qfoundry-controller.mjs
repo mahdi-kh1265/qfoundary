@@ -46,6 +46,8 @@ function usage() {
 Options:
   --state <path>              State path relative to project root (default .qfoundry/controller-state.json)
   --orca <command>            Orca CLI command or absolute path (default orca)
+  --orca-arg <arg>            Extra Orca command prefix argument; repeatable
+  --from-terminal <handle>    Coordinator terminal handle for Orca dispatch/reply attribution
   --review-command <command>  Command that reads review JSON input on stdin and prints strict review JSON
   --review-arg <arg>          Extra review command argument; repeatable
   --review-timeout-ms <n>     Review command timeout (default 120000)
@@ -86,6 +88,8 @@ async function loadConfiguredController(args, projectRoot, statePath) {
     state,
     orca: new OrcaJsonCli({
       command: argValue(args, 'orca', 'orca'),
+      commandArgs: repeatedArgs(args, 'orca-arg'),
+      fromTerminal: argValue(args, 'from-terminal') ?? state.settings.coordinatorTerminalHandle,
       cwd: projectRoot,
       timeoutMs: parsePositiveInteger(args, 'orca-timeout-ms', 60_000)
     }),

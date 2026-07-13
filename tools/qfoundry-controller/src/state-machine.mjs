@@ -83,7 +83,7 @@ export function requireDispatchApprovalPrecondition(state) {
   if (!/^DEC-[A-Za-z0-9-]+$/.test(approval.decisionRecordId ?? '')) {
     missing.push('a DEC-* decision record must exist')
   }
-  if (approval.approvalGateResolved === false) {
+  if (approval.approvalGateResolved !== true) {
     missing.push('any approval gate created for the contract must be resolved')
   }
   if (missing.length > 0) {

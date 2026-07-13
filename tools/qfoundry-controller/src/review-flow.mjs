@@ -30,19 +30,7 @@ export async function buildTaskReview({
     })
     task.gitEvidence = gitEvidence
     task.verificationEvidence = verificationEvidence
-    if (!verificationEvidence.ok) {
-      return {
-        verdict: 'rejected',
-        summary: 'Deterministic qFoundry verification failed or was incomplete.',
-        failedRequirements: task.requirements ?? [],
-        failedAcceptanceCriteria: task.acceptanceCriteria ?? [],
-        testsRun: verificationEvidence.results.map(
-          (result) => `${result.command} ${result.args.join(' ')}`
-        ),
-        evidence: verificationEvidence.failures,
-        expectedCorrection: 'Make the implementation pass the required deterministic verification.'
-      }
-    }
+
     const review = await reviewer.review({
       projectRoot,
       contractText,
@@ -52,19 +40,38 @@ export async function buildTaskReview({
       verificationEvidence,
       workerReportText
     })
+
+    if (!verificationEvidence.ok) {
+      const deterministicTests = verificationEvidence.results.map(
+        (result) => `${result.command} ${result.args.join(' ')}`
+      )
+      return {
+        ...review,
+        verdict: 'rejected',
+        summary:
+          review.verdict === 'accepted' || review.verdict === 'accepted_with_follow_up'
+            ? 'Rejected despite reviewer acceptance: deterministic qFoundry verification failed or was incomplete.'
+            : review.summary,
+        failedRequirements: [
+          ...new Set([...(review.failedRequirements ?? []), ...(task.requirements ?? [])])
+        ],
+        failedAcceptanceCriteria: [
+          ...new Set([
+            ...(review.failedAcceptanceCriteria ?? []),
+            ...(task.acceptanceCriteria ?? [])
+          ])
+        ],
+        testsRun: [...(review.testsRun ?? []), ...deterministicTests],
+        evidence: [...(review.evidence ?? []), ...verificationEvidence.failures],
+        expectedCorrection:
+          review.expectedCorrection ??
+          'Make the implementation pass the required deterministic verification.'
+      }
+    }
     if (review.verdict !== 'accepted' && review.verdict !== 'accepted_with_follow_up') {
       return review
     }
-    return verificationEvidence.ok
-      ? review
-      : {
-          ...review,
-          verdict: 'rejected',
-          summary: `Rejected despite reviewer acceptance: ${verificationEvidence.failures.join('; ')}`,
-          failedRequirements: task.requirements ?? [],
-          failedAcceptanceCriteria: task.acceptanceCriteria ?? [],
-          evidence: [...(review.evidence ?? []), ...verificationEvidence.failures]
-        }
+    return review
   } catch (error) {
     task.verificationFailure = {
       at: now().toISOString(),

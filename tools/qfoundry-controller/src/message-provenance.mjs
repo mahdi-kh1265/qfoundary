@@ -8,13 +8,25 @@ export function senderTerminalHandle(message, messagePayload) {
   const payload = messagePayload(message)
   return (
     payload.senderTerminalHandle ??
+    payload.sender_terminal_handle ??
     payload.terminalHandle ??
+    payload.terminal_handle ??
     payload.fromTerminal ??
+    payload.from_terminal ??
+    payload.fromHandle ??
+    payload.from_handle ??
     payload.sender?.terminalHandle ??
+    payload.sender?.terminal_handle ??
     message.senderTerminalHandle ??
+    message.sender_terminal_handle ??
     message.terminalHandle ??
+    message.terminal_handle ??
     message.fromTerminal ??
+    message.from_terminal ??
+    message.fromHandle ??
+    message.from_handle ??
     message.sender?.terminalHandle ??
+    message.sender?.terminal_handle ??
     null
   )
 }
